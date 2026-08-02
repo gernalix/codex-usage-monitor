@@ -1,0 +1,20 @@
+[Unit]
+Description=Codex usage monitor SQLite snapshot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/codex-usage-monitor
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/home/ubuntu/.config/codex-usage-monitor/codex-usage-monitor.env
+ExecStart=/home/ubuntu/codex-usage-monitor/.venv/bin/python /home/ubuntu/codex-usage-monitor/codex_usage_monitor.py once
+TimeoutStartSec=180
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/home/ubuntu/sync_root/db /home/ubuntu/.local/state/codex-usage-monitor /home/ubuntu/.config/codex-usage-monitor
+StandardOutput=journal
+StandardError=journal

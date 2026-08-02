@@ -1,0 +1,9 @@
+[project]
+name = "codex-usage-monitor"
+version = "2026.08.02"
+description = "Oracle VM Codex usage monitor with SQLite/Datasette persistence"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

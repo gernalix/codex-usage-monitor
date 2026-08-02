@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Codex usage monitor every 15 minutes
+
+[Timer]
+OnBootSec=3min
+OnCalendar=*:0/15
+AccuracySec=30s
+Persistent=true
+Unit=codex-usage-monitor.service
+
+[Install]
+WantedBy=timers.target
