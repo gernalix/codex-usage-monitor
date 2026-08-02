@@ -849,6 +849,7 @@ def build_notification_events(cfg: Config, con: sqlite3.Connection, snapshot_id:
     if current is None:
         return []
     events: list[tuple[str, str, str, str]] = []
+    reset_count_text = "unavailable" if current["usage_limit_resets_available"] is None else str(current["usage_limit_resets_available"])
     if current["acquisition_status"] != "ok":
         failures = consecutive_failures(con)
         if failures >= cfg.notify_failure_after_runs:
@@ -869,7 +870,7 @@ def build_notification_events(cfg: Config, con: sqlite3.Connection, snapshot_id:
                     f"quota_change:{current['weekly_used_percent']}:{current['weekly_reset_at_utc']}",
                     "quota_change",
                     "Codex weekly quota changed",
-                    f"Weekly used {previous['weekly_used_percent']} -> {current['weekly_used_percent']} percent; reset {current['weekly_reset_at_utc'] or 'unavailable'}",
+                    f"Weekly used {previous['weekly_used_percent']} -> {current['weekly_used_percent']} percent; weekly reset {current['weekly_reset_at_utc'] or 'unavailable'}; usage limit resets available {reset_count_text}",
                 )
             )
         if previous["usage_limit_resets_available"] != current["usage_limit_resets_available"]:
@@ -892,7 +893,7 @@ def build_notification_events(cfg: Config, con: sqlite3.Connection, snapshot_id:
                         f"approaching_expiry:{reset_at.strftime('%Y%m%dT%H')}",
                         "approaching_expiry",
                         "Codex weekly quota reset approaching",
-                        f"Weekly quota reset is in {hours:.1f} hours at {reset_raw}.",
+                        f"Weekly quota reset is in {hours:.1f} hours at {reset_raw}; usage limit resets available {reset_count_text}.",
                     )
                 )
         except ValueError:
@@ -1065,8 +1066,23 @@ def command_status(args: argparse.Namespace) -> int:
 def command_notify_test(args: argparse.Namespace) -> int:
     cfg = build_config(args)
     init_db(cfg)
+    with connect_db(cfg) as con:
+        latest = con.execute("SELECT * FROM latest_state").fetchone()
+    if latest is None:
+        snapshot_text = "No SQLite snapshot is available yet."
+    else:
+        reset_count_text = "unavailable" if latest["usage_limit_resets_available"] is None else str(latest["usage_limit_resets_available"])
+        snapshot_text = (
+            f"Latest snapshot {latest['snapshot_id']} at {latest['acquired_at_utc']}: "
+            f"status {latest['acquisition_status']}; "
+            f"weekly used {latest['weekly_used_percent']} percent; "
+            f"weekly remaining {latest['weekly_remaining_percent']} percent; "
+            f"weekly reset {latest['weekly_reset_at_utc'] or 'unavailable'}; "
+            f"usage limit resets available {reset_count_text}; "
+            f"source {latest['source_format'] or latest['source_method']}."
+        )
     title = "[TEST] Codex usage monitor"
-    message = f"Test notification from Oracle VM at {utc_stamp()}. No secrets are included."
+    message = f"Test notification from Oracle VM at {utc_stamp()}. {snapshot_text} No secrets are included."
     if args.dry_run:
         print(json.dumps({"status": "dry_run", "title": title, "message": message}, sort_keys=True))
         return 0

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 
 import codex_usage_monitor as monitor
 
@@ -62,6 +64,35 @@ class ResetCountParsingTests(unittest.TestCase):
         self.assertIsNone(remaining)
         self.assertIsNone(reset)
         self.assertTrue(warnings)
+
+    def test_quota_change_notification_includes_reset_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = monitor.Config(
+                db_path=Path(tmp) / "codex_usage_monitor.db",
+                state_dir=Path(tmp),
+                lock_path=Path(tmp) / "lock",
+                codex_bin="codex",
+                app_server_port=38655,
+                source_timeout_sec=5,
+                startup_timeout_sec=5,
+                sqlite_timeout_sec=5,
+                telegram_helper=Path(tmp) / "telegram_notify.py",
+                telegram_enabled=True,
+                notify_approaching_expiry_hours=12,
+                notify_failure_after_runs=3,
+                notification_cooldown_minutes=60,
+            )
+            monitor.init_db(cfg)
+            with monitor.connect_db(cfg) as con:
+                run_id = monitor.start_run(con)
+                older = monitor.QuotaReading(31, 69, "2026-08-08T07:59:53Z", 1, "test", "older", "", (), None)
+                current = monitor.QuotaReading(32, 68, "2026-08-08T07:59:53Z", 1, "test", "current", "", (), None)
+                monitor.insert_snapshot(con, run_id, "ok", older)
+                snapshot_id = monitor.insert_snapshot(con, run_id, "ok", current)
+                events = monitor.build_notification_events(cfg, con, snapshot_id)
+            quota_messages = [event[3] for event in events if event[1] == "quota_change"]
+            self.assertTrue(quota_messages)
+            self.assertIn("usage limit resets available 1", quota_messages[0])
 
 
 if __name__ == "__main__":
