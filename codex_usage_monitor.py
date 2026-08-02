@@ -850,20 +850,23 @@ def fmt_value(value: Any, suffix: str = "") -> str:
     return f"{value}{suffix}"
 
 
+def format_display_datetime(value: Any) -> str:
+    if not value:
+        return "unavailable"
+    try:
+        parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return str(value)
+    return parsed.astimezone(dt.timezone.utc).strftime("%d-%m-%y %H:%M")
+
+
 def snapshot_message_lines(row: sqlite3.Row, *, include_source: bool = False) -> list[str]:
     reset_count = "unavailable" if row["usage_limit_resets_available"] is None else str(row["usage_limit_resets_available"])
-    lines = [
-        f"Snapshot: {row['snapshot_id']}",
-        f"Status: {row['acquisition_status']}",
-        f"Weekly used: {fmt_value(row['weekly_used_percent'], '%')}",
+    return [
         f"Weekly remaining: {fmt_value(row['weekly_remaining_percent'], '%')}",
-        f"Weekly reset: {row['weekly_reset_at_utc'] or 'unavailable'}",
+        f"Weekly reset: {format_display_datetime(row['weekly_reset_at_utc'])}",
         f"Usage limit resets available: {reset_count}",
-        f"Acquired: {row['acquired_at_utc']}",
     ]
-    if include_source:
-        lines.append(f"Source: {row['source_format'] or row['source_method']}")
-    return lines
 
 
 def build_notification_events(cfg: Config, con: sqlite3.Connection, snapshot_id: int) -> list[tuple[str, str, str, str]]:
@@ -1103,9 +1106,9 @@ def command_notify_test(args: argparse.Namespace) -> int:
     if latest is None:
         snapshot_text = "No SQLite snapshot is available yet."
     else:
-        snapshot_text = "\n".join(snapshot_message_lines(latest, include_source=True))
+        snapshot_text = "\n".join(snapshot_message_lines(latest))
     title = "[TEST] Codex usage monitor"
-    message = "\n".join(["Test notification from Oracle VM", f"Generated: {utc_stamp()}", snapshot_text, "No secrets included."])
+    message = snapshot_text
     if args.dry_run:
         print(json.dumps({"status": "dry_run", "title": title, "message": message}, sort_keys=True))
         return 0
