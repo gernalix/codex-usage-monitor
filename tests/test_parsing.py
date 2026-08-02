@@ -94,6 +94,36 @@ class ResetCountParsingTests(unittest.TestCase):
             self.assertTrue(quota_messages)
             self.assertIn("usage limit resets available 1", quota_messages[0])
 
+    def test_reset_count_change_triggers_distinct_notification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = monitor.Config(
+                db_path=Path(tmp) / "codex_usage_monitor.db",
+                state_dir=Path(tmp),
+                lock_path=Path(tmp) / "lock",
+                codex_bin="codex",
+                app_server_port=38655,
+                source_timeout_sec=5,
+                startup_timeout_sec=5,
+                sqlite_timeout_sec=5,
+                telegram_helper=Path(tmp) / "telegram_notify.py",
+                telegram_enabled=True,
+                notify_approaching_expiry_hours=12,
+                notify_failure_after_runs=3,
+                notification_cooldown_minutes=60,
+            )
+            monitor.init_db(cfg)
+            with monitor.connect_db(cfg) as con:
+                run_id = monitor.start_run(con)
+                older = monitor.QuotaReading(32, 68, "2026-08-08T07:59:53Z", 1, "test", "older-reset", "", (), None)
+                current = monitor.QuotaReading(32, 68, "2026-08-08T07:59:53Z", 2, "test", "current-reset", "", (), None)
+                monitor.insert_snapshot(con, run_id, "ok", older)
+                snapshot_id = monitor.insert_snapshot(con, run_id, "ok", current)
+                events = monitor.build_notification_events(cfg, con, snapshot_id)
+            reset_events = [event for event in events if event[1] == "reset_count_change"]
+            self.assertEqual(len(reset_events), 1)
+            self.assertEqual(reset_events[0][0], "reset_count_change:1->2")
+            self.assertIn("Usage limit resets available 1 -> 2", reset_events[0][3])
+
 
 if __name__ == "__main__":
     unittest.main()

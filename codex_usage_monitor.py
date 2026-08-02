@@ -876,10 +876,10 @@ def build_notification_events(cfg: Config, con: sqlite3.Connection, snapshot_id:
         if previous["usage_limit_resets_available"] != current["usage_limit_resets_available"]:
             events.append(
                 (
-                    f"reset_count_change:{current['usage_limit_resets_available']}",
+                    f"reset_count_change:{previous['usage_limit_resets_available']}->{current['usage_limit_resets_available']}",
                     "reset_count_change",
                     "Codex usage reset count changed",
-                    f"Usage limit resets available {previous['usage_limit_resets_available']} -> {current['usage_limit_resets_available']}",
+                    f"Usage limit resets available {previous['usage_limit_resets_available']} -> {current['usage_limit_resets_available']}; weekly used {current['weekly_used_percent']} percent; weekly reset {current['weekly_reset_at_utc'] or 'unavailable'}",
                 )
             )
     reset_raw = current["weekly_reset_at_utc"]
