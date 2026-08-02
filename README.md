@@ -19,6 +19,7 @@ Default database:
 Default unit:
 
 `codex-usage-monitor.timer` runs `codex-usage-monitor.service` every 15 minutes.
+It uses `/usr/bin/python3` and only global/stdlib Python modules.
 
 ## Commands
 

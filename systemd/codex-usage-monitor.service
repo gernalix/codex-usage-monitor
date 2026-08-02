@@ -10,7 +10,7 @@ Group=ubuntu
 WorkingDirectory=/home/ubuntu/codex-usage-monitor
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-/home/ubuntu/.config/codex-usage-monitor/codex-usage-monitor.env
-ExecStart=/home/ubuntu/codex-usage-monitor/.venv/bin/python /home/ubuntu/codex-usage-monitor/codex_usage_monitor.py once
+ExecStart=/usr/bin/python3 /home/ubuntu/codex-usage-monitor/codex_usage_monitor.py once
 TimeoutStartSec=180
 NoNewPrivileges=true
 PrivateTmp=true
