@@ -92,7 +92,7 @@ class ResetCountParsingTests(unittest.TestCase):
                 events = monitor.build_notification_events(cfg, con, snapshot_id)
             quota_messages = [event[3] for event in events if event[1] == "quota_change"]
             self.assertTrue(quota_messages)
-            self.assertIn("usage limit resets available 1", quota_messages[0])
+            self.assertIn("Usage limit resets available: 1", quota_messages[0])
 
     def test_reset_count_change_triggers_distinct_notification(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -122,7 +122,7 @@ class ResetCountParsingTests(unittest.TestCase):
             reset_events = [event for event in events if event[1] == "reset_count_change"]
             self.assertEqual(len(reset_events), 1)
             self.assertEqual(reset_events[0][0], "reset_count_change:1->2")
-            self.assertIn("Usage limit resets available 1 -> 2", reset_events[0][3])
+            self.assertIn("Usage limit resets available: 1 -> 2", reset_events[0][3])
 
 
 if __name__ == "__main__":
