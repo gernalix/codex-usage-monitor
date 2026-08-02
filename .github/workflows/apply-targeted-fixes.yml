@@ -1,0 +1,61 @@
+name: Apply targeted monitor fixes
+
+on:
+  push:
+    paths:
+      - .github/workflows/apply-targeted-fixes.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch monitor
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("codex_usage_monitor.py")
+          text = path.read_text(encoding="utf-8")
+
+          replacements = [
+              (
+                  '''            if opcode == 0x9:\n                continue\n''',
+                  '''            if opcode == 0x9:\n                if len(payload) > 125:\n                    raise SourceError("WebSocket ping payload exceeds control-frame limit")\n                mask = secrets.token_bytes(4)\n                header = bytes((0x8A, 0x80 | len(payload))) + mask\n                masked_payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))\n                self.sock.sendall(header + masked_payload)\n                continue\n''',
+              ),
+              (
+                  '''            WHERE usage_limit_resets_available IS NOT previous_resets\n''',
+                  '''            WHERE usage_limit_resets_available IS NOT NULL\n              AND previous_resets IS NOT NULL\n              AND usage_limit_resets_available != previous_resets\n''',
+              ),
+              (
+                  '''        if previous["usage_limit_resets_available"] != current["usage_limit_resets_available"]:\n''',
+                  '''        previous_reset_count = previous["usage_limit_resets_available"]\n        current_reset_count = current["usage_limit_resets_available"]\n        if (\n            previous_reset_count is not None\n            and current_reset_count is not None\n            and previous_reset_count != current_reset_count\n        ):\n''',
+              ),
+              (
+                  '''            status = "ok" if reading.weekly_used_percent is not None else "partial"\n''',
+                  '''            required_values = (\n                reading.weekly_used_percent,\n                reading.weekly_remaining_percent,\n                reading.weekly_reset_at_utc,\n                reading.usage_limit_resets_available,\n            )\n            status = "ok" if all(value is not None for value in required_values) else "partial"\n''',
+              ),
+          ]
+
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"Expected exactly one match, found {count}: {old!r}")
+              text = text.replace(old, new, 1)
+
+          path.write_text(text, encoding="utf-8")
+      - name: Compile
+        run: python3 -m py_compile codex_usage_monitor.py
+      - name: Test
+        run: python3 -m unittest discover -s tests -v
+      - name: Remove one-time workflow and commit
+        run: |
+          rm .github/workflows/apply-targeted-fixes.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add codex_usage_monitor.py .github/workflows/apply-targeted-fixes.yml
+          git commit -m "Fix partial state, reset transitions, and WebSocket pong"
+          git push origin HEAD:main
