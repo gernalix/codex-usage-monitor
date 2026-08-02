@@ -1107,7 +1107,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = build_parser().parse_args(argv)
-    return int(args.func(args))
+    try:
+        return int(args.func(args))
+    except MonitorError as exc:
+        print(json.dumps({"status": "error", "error": sanitize(exc, 700)}, sort_keys=True), file=sys.stderr)
+        return 75
 
 
 if __name__ == "__main__":
