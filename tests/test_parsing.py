@@ -8,6 +8,23 @@ import codex_usage_monitor as monitor
 
 
 class ResetCountParsingTests(unittest.TestCase):
+    def make_cfg(self, tmp: str) -> monitor.Config:
+        return monitor.Config(
+            db_path=Path(tmp) / "codex_usage_monitor.db",
+            state_dir=Path(tmp),
+            lock_path=Path(tmp) / "lock",
+            codex_bin="codex",
+            app_server_port=38655,
+            source_timeout_sec=5,
+            startup_timeout_sec=5,
+            sqlite_timeout_sec=5,
+            telegram_helper=Path(tmp) / "telegram_notify.py",
+            telegram_enabled=True,
+            notify_approaching_expiry_hours=12,
+            notify_failure_after_runs=3,
+            notification_cooldown_minutes=60,
+        )
+
     def test_structured_one_reset(self) -> None:
         payload = {"rateLimitResetCredits": {"availableCount": 1, "credits": [{"status": "available"}]}}
         value, warnings = monitor.reset_count_from_payload(payload)
@@ -67,21 +84,7 @@ class ResetCountParsingTests(unittest.TestCase):
 
     def test_quota_change_notification_includes_reset_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = monitor.Config(
-                db_path=Path(tmp) / "codex_usage_monitor.db",
-                state_dir=Path(tmp),
-                lock_path=Path(tmp) / "lock",
-                codex_bin="codex",
-                app_server_port=38655,
-                source_timeout_sec=5,
-                startup_timeout_sec=5,
-                sqlite_timeout_sec=5,
-                telegram_helper=Path(tmp) / "telegram_notify.py",
-                telegram_enabled=True,
-                notify_approaching_expiry_hours=12,
-                notify_failure_after_runs=3,
-                notification_cooldown_minutes=60,
-            )
+            cfg = self.make_cfg(tmp)
             monitor.init_db(cfg)
             with monitor.connect_db(cfg) as con:
                 run_id = monitor.start_run(con)
@@ -97,21 +100,7 @@ class ResetCountParsingTests(unittest.TestCase):
 
     def test_reset_count_change_triggers_distinct_notification(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = monitor.Config(
-                db_path=Path(tmp) / "codex_usage_monitor.db",
-                state_dir=Path(tmp),
-                lock_path=Path(tmp) / "lock",
-                codex_bin="codex",
-                app_server_port=38655,
-                source_timeout_sec=5,
-                startup_timeout_sec=5,
-                sqlite_timeout_sec=5,
-                telegram_helper=Path(tmp) / "telegram_notify.py",
-                telegram_enabled=True,
-                notify_approaching_expiry_hours=12,
-                notify_failure_after_runs=3,
-                notification_cooldown_minutes=60,
-            )
+            cfg = self.make_cfg(tmp)
             monitor.init_db(cfg)
             with monitor.connect_db(cfg) as con:
                 run_id = monitor.start_run(con)
@@ -127,21 +116,7 @@ class ResetCountParsingTests(unittest.TestCase):
 
     def test_snapshot_message_has_compact_telegram_format(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = monitor.Config(
-                db_path=Path(tmp) / "codex_usage_monitor.db",
-                state_dir=Path(tmp),
-                lock_path=Path(tmp) / "lock",
-                codex_bin="codex",
-                app_server_port=38655,
-                source_timeout_sec=5,
-                startup_timeout_sec=5,
-                sqlite_timeout_sec=5,
-                telegram_helper=Path(tmp) / "telegram_notify.py",
-                telegram_enabled=True,
-                notify_approaching_expiry_hours=12,
-                notify_failure_after_runs=3,
-                notification_cooldown_minutes=60,
-            )
+            cfg = self.make_cfg(tmp)
             monitor.init_db(cfg)
             with monitor.connect_db(cfg) as con:
                 run_id = monitor.start_run(con)
@@ -154,6 +129,50 @@ class ResetCountParsingTests(unittest.TestCase):
                 message,
                 "Weekly remaining: 68%\nWeekly reset: 08-08-26 07:59\nUsage limit resets available: 1",
             )
+
+    def test_init_db_creates_canonical_datasette_views(self) -> None:
+        expected = {
+            "history",
+            "latest_state",
+            "quota_diagnostics",
+            "quota_overview",
+            "recent_failures",
+            "reset_count_changes",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_cfg(tmp)
+            monitor.init_db(cfg)
+            with monitor.connect_db(cfg) as con:
+                rows = con.execute("SELECT name, sql FROM sqlite_master WHERE type='view'").fetchall()
+            views = {row["name"]: row["sql"] for row in rows}
+        self.assertEqual(set(views), expected)
+        self.assertIn("CREATE VIEW quota_overview AS", views["quota_overview"])
+        self.assertIn("ORDER BY acquired_at_utc DESC, snapshot_id DESC", views["quota_overview"])
+        self.assertIn("CREATE VIEW quota_diagnostics AS", views["quota_diagnostics"])
+        self.assertIn("source_method", views["quota_diagnostics"])
+
+    def test_init_db_upgrades_existing_view_definitions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_cfg(tmp)
+            monitor.init_db(cfg)
+            with monitor.connect_db(cfg) as con:
+                con.executescript(
+                    """
+                    DROP VIEW quota_overview;
+                    CREATE VIEW quota_overview AS SELECT snapshot_id FROM quota_snapshots;
+                    """
+                )
+                con.commit()
+
+            monitor.init_db(cfg)
+
+            with monitor.connect_db(cfg) as con:
+                sql = con.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='view' AND name='quota_overview'"
+                ).fetchone()[0]
+        self.assertIn("weekly_remaining_percent", sql)
+        self.assertIn("ORDER BY acquired_at_utc DESC, snapshot_id DESC", sql)
+        self.assertNotIn("SELECT snapshot_id FROM quota_snapshots", sql)
 
 
 if __name__ == "__main__":

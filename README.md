@@ -34,5 +34,7 @@ python3 codex_usage_monitor.py notify-test
 
 - `latest_state`
 - `history`
+- `quota_overview`
+- `quota_diagnostics`
 - `reset_count_changes`
 - `recent_failures`

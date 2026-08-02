@@ -701,13 +701,20 @@ def init_db(cfg: Config) -> None:
                 backup_path TEXT
             );
 
-            CREATE VIEW IF NOT EXISTS latest_state AS
+            DROP VIEW IF EXISTS latest_state;
+            DROP VIEW IF EXISTS history;
+            DROP VIEW IF EXISTS reset_count_changes;
+            DROP VIEW IF EXISTS recent_failures;
+            DROP VIEW IF EXISTS quota_overview;
+            DROP VIEW IF EXISTS quota_diagnostics;
+
+            CREATE VIEW latest_state AS
             SELECT *
             FROM quota_snapshots
             ORDER BY acquired_at_utc DESC, snapshot_id DESC
             LIMIT 1;
 
-            CREATE VIEW IF NOT EXISTS history AS
+            CREATE VIEW history AS
             SELECT snapshot_id, acquired_at_utc, acquisition_status, weekly_used_percent,
                    weekly_remaining_percent, weekly_reset_at_utc,
                    usage_limit_resets_available, source_format, provenance,
@@ -715,7 +722,7 @@ def init_db(cfg: Config) -> None:
             FROM quota_snapshots
             ORDER BY acquired_at_utc DESC, snapshot_id DESC;
 
-            CREATE VIEW IF NOT EXISTS reset_count_changes AS
+            CREATE VIEW reset_count_changes AS
             WITH ordered AS (
                 SELECT snapshot_id, acquired_at_utc, usage_limit_resets_available,
                        LAG(usage_limit_resets_available) OVER (ORDER BY acquired_at_utc, snapshot_id) AS previous_resets
@@ -727,12 +734,36 @@ def init_db(cfg: Config) -> None:
             WHERE usage_limit_resets_available IS NOT previous_resets
             ORDER BY acquired_at_utc DESC, snapshot_id DESC;
 
-            CREATE VIEW IF NOT EXISTS recent_failures AS
+            CREATE VIEW recent_failures AS
             SELECT snapshot_id, acquired_at_utc, acquisition_status, sanitized_error, parse_warnings, source_format
             FROM quota_snapshots
             WHERE acquisition_status != 'ok'
             ORDER BY acquired_at_utc DESC, snapshot_id DESC
             LIMIT 50;
+
+            CREATE VIEW quota_overview AS
+            SELECT acquired_at_utc,
+                   weekly_used_percent,
+                   weekly_remaining_percent,
+                   weekly_reset_at_utc,
+                   usage_limit_resets_available,
+                   acquisition_status
+            FROM quota_snapshots
+            ORDER BY acquired_at_utc DESC, snapshot_id DESC;
+
+            CREATE VIEW quota_diagnostics AS
+            SELECT snapshot_id,
+                   run_id,
+                   acquired_at_utc,
+                   source_method,
+                   source_version,
+                   source_format,
+                   acquisition_status,
+                   sanitized_error,
+                   parse_warnings,
+                   provenance
+            FROM quota_snapshots
+            ORDER BY acquired_at_utc DESC, snapshot_id DESC;
             """
         )
         con.commit()
