@@ -348,6 +348,12 @@ class WebSocketClient:
             if opcode == 0x8:
                 raise SourceError("WebSocket closed by server")
             if opcode == 0x9:
+                if len(payload) > 125:
+                    raise SourceError("WebSocket ping payload exceeds control-frame limit")
+                mask = secrets.token_bytes(4)
+                header = bytes((0x8A, 0x80 | len(payload))) + mask
+                masked_payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+                self.sock.sendall(header + masked_payload)
                 continue
             if opcode in (0x1, 0x0):
                 chunks.append(payload)
@@ -731,7 +737,9 @@ def init_db(cfg: Config) -> None:
             )
             SELECT *
             FROM ordered
-            WHERE usage_limit_resets_available IS NOT previous_resets
+            WHERE usage_limit_resets_available IS NOT NULL
+              AND previous_resets IS NOT NULL
+              AND usage_limit_resets_available != previous_resets
             ORDER BY acquired_at_utc DESC, snapshot_id DESC;
 
             CREATE VIEW recent_failures AS
@@ -936,7 +944,13 @@ def build_notification_events(cfg: Config, con: sqlite3.Connection, snapshot_id:
                     ),
                 )
             )
-        if previous["usage_limit_resets_available"] != current["usage_limit_resets_available"]:
+        previous_reset_count = previous["usage_limit_resets_available"]
+        current_reset_count = current["usage_limit_resets_available"]
+        if (
+            previous_reset_count is not None
+            and current_reset_count is not None
+            and previous_reset_count != current_reset_count
+        ):
             events.append(
                 (
                     f"reset_count_change:{previous['usage_limit_resets_available']}->{current['usage_limit_resets_available']}",
@@ -1039,7 +1053,13 @@ def command_once(args: argparse.Namespace) -> int:
         try:
             payload = read_rate_limits(cfg)
             reading = reading_from_payload(payload)
-            status = "ok" if reading.weekly_used_percent is not None else "partial"
+            required_values = (
+                reading.weekly_used_percent,
+                reading.weekly_remaining_percent,
+                reading.weekly_reset_at_utc,
+                reading.usage_limit_resets_available,
+            )
+            status = "ok" if all(value is not None for value in required_values) else "partial"
             snapshot_id = insert_snapshot(con, run_id, status, reading)
             finish_run(con, run_id, status)
             dispatch_notifications(cfg, con, snapshot_id, dry_run=args.dry_run_notifications)
