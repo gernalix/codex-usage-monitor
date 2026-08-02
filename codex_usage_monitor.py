@@ -174,7 +174,13 @@ def build_config(args: argparse.Namespace | None = None) -> Config:
 
 def sanitize(text: Any, limit: int = 1000) -> str:
     if not isinstance(text, str):
-        text = json.dumps(text, ensure_ascii=False, sort_keys=True)
+        if isinstance(text, BaseException):
+            text = str(text)
+        else:
+            try:
+                text = json.dumps(text, ensure_ascii=False, sort_keys=True, default=str)
+            except TypeError:
+                text = str(text)
     redacted = str(text).replace("\x00", " ")
     for pattern, replacement in SENSITIVE_PATTERNS:
         redacted = pattern.sub(replacement, redacted)
