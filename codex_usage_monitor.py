@@ -847,6 +847,8 @@ def notification_recently_sent(con: sqlite3.Connection, event_key: str, cooldown
 def fmt_value(value: Any, suffix: str = "") -> str:
     if value is None:
         return "unavailable"
+    if isinstance(value, float) and value.is_integer():
+        return f"{int(value)}{suffix}"
     return f"{value}{suffix}"
 
 

@@ -152,7 +152,7 @@ class ResetCountParsingTests(unittest.TestCase):
                 message = "\n".join(monitor.snapshot_message_lines(row))
             self.assertEqual(
                 message,
-                "Weekly remaining: 68.0%\nWeekly reset: 08-08-26 07:59\nUsage limit resets available: 1",
+                "Weekly remaining: 68%\nWeekly reset: 08-08-26 07:59\nUsage limit resets available: 1",
             )
 
 
