@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import gzip
 import json
-import os
 import tempfile
 from pathlib import Path
 import unittest
@@ -120,127 +119,6 @@ class SessionArchiveTests(unittest.TestCase):
             result = argparse_like(root)
             self.assertEqual(archive.command_verify(result), 0)
 
-    def test_partial_tail_is_not_corrupt(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "archive"
-            source = Path(tmp) / "sessions"
-            session_id = "019fd1da-cc5d-7db1-b880-a14be6111c38"
-            src = source / "rollout-2026-08-05T12-00-00-019fd1da-cc5d-7db1-b880-a14be6111c38.jsonl"
-            write_jsonl(src, self.make_rows(session_id))
-            with src.open("a", encoding="utf-8") as handle:
-                handle.write('{"timestamp": "2026-08-05T10:00:05.000Z", "type":')
-
-            _session_id, _did_import, manifest = archive.import_session(root, source, src)
-
-            self.assertEqual(manifest["status"], "partial")
-            self.assertEqual(manifest["classification"], "partial_tail")
-            self.assertEqual(manifest["invalid_internal_json_lines"], 0)
-            self.assertEqual(manifest["partial_tail_lines"], 1)
-            self.assertEqual(archive.command_verify(argparse_like(root)), 0)
-
-    def test_invalid_internal_json_is_corrupt(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "archive"
-            source = Path(tmp) / "sessions"
-            session_id = "019fd1da-cc5d-7db1-b880-a14be6111c38"
-            src = source / "rollout-2026-08-05T12-00-00-019fd1da-cc5d-7db1-b880-a14be6111c38.jsonl"
-            rows = self.make_rows(session_id)
-            src.parent.mkdir(parents=True, exist_ok=True)
-            with src.open("w", encoding="utf-8") as handle:
-                handle.write(json.dumps(rows[0]) + "\n")
-                handle.write("{not-json}\n")
-                for row in rows[1:]:
-                    handle.write(json.dumps(row) + "\n")
-
-            _session_id, _did_import, manifest = archive.import_session(root, source, src)
-
-            self.assertEqual(manifest["status"], "corrupt")
-            self.assertEqual(manifest["classification"], "invalid_internal_json")
-            self.assertEqual(manifest["invalid_internal_json_lines"], 1)
-
-    def test_task_complete_not_final_still_records_last_event(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "archive"
-            source = Path(tmp) / "sessions"
-            session_id = "019fd1da-cc5d-7db1-b880-a14be6111c38"
-            src = source / "rollout-2026-08-05T12-00-00-019fd1da-cc5d-7db1-b880-a14be6111c38.jsonl"
-            rows = self.make_rows(session_id)
-            rows.append({"timestamp": "2026-08-05T10:00:05.000Z", "type": "event_msg", "payload": {"type": "note", "message": "after complete"}})
-            write_jsonl(src, rows)
-
-            _session_id, _did_import, manifest = archive.import_session(root, source, src)
-
-            self.assertEqual(manifest["status"], "complete")
-            self.assertTrue(manifest["task_complete_observed"])
-            self.assertEqual(manifest["last_event_subtype"], "note")
-
-    def test_prompt_id_uses_relational_table(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "archive"
-            source = Path(tmp) / "sessions"
-            session_id = "019fd1da-cc5d-7db1-b880-a14be6111c38"
-            src = source / "rollout-2026-08-05T12-00-00-019fd1da-cc5d-7db1-b880-a14be6111c38.jsonl"
-            write_jsonl(src, self.make_rows(session_id))
-            archive.import_session(root, source, src)
-
-            with archive.connect_db(root) as con:
-                prompt_rows = con.execute("SELECT prompt_id FROM session_prompts").fetchall()
-                search_rows = archive.rows_for_filters(root, argparse_like(root, prompt_id="4"))
-
-            self.assertEqual([row["prompt_id"] for row in prompt_rows], ["4"])
-            self.assertEqual(len(search_rows), 1)
-
-    def test_hash_tampering_is_detected(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "archive"
-            source = Path(tmp) / "sessions"
-            session_id = "019fd1da-cc5d-7db1-b880-a14be6111c38"
-            src = source / "rollout-2026-08-05T12-00-00-019fd1da-cc5d-7db1-b880-a14be6111c38.jsonl"
-            write_jsonl(src, self.make_rows(session_id))
-            _archive_id, _did_import, manifest = archive.import_session(root, source, src)
-            Path(manifest["markdown_path"]).write_text("tampered\n", encoding="utf-8")
-
-            self.assertNotEqual(archive.command_verify(argparse_like(root)), 0)
-
-    def test_verify_deep_regenerates_from_raw(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "archive"
-            source = Path(tmp) / "sessions"
-            session_id = "019fd1da-cc5d-7db1-b880-a14be6111c38"
-            src = source / "rollout-2026-08-05T12-00-00-019fd1da-cc5d-7db1-b880-a14be6111c38.jsonl"
-            write_jsonl(src, self.make_rows(session_id))
-            archive.import_session(root, source, src)
-
-            self.assertEqual(archive.command_verify(argparse_like(root, deep=True)), 0)
-
-    def test_export_validation(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "archive"
-            source = Path(tmp) / "sessions"
-            out = Path(tmp) / "export.tar.gz"
-            session_id = "019fd1da-cc5d-7db1-b880-a14be6111c38"
-            src = source / "rollout-2026-08-05T12-00-00-019fd1da-cc5d-7db1-b880-a14be6111c38.jsonl"
-            write_jsonl(src, self.make_rows(session_id))
-            archive.import_session(root, source, src)
-
-            self.assertEqual(archive.command_export(argparse_like(root, output=out)), 0)
-            self.assertEqual(archive.command_validate_export(argparse_like(root, export_path=out)), 0)
-
-    def test_symlink_source_is_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "archive"
-            source = Path(tmp) / "sessions"
-            target = Path(tmp) / "outside.jsonl"
-            target.write_text("{}\n", encoding="utf-8")
-            source.mkdir(parents=True)
-            link = source / "link.jsonl"
-            os.symlink(target, link)
-
-            self.assertEqual(archive.command_import(argparse_like(root, source_root=source, codex_dir=Path(tmp) / ".codex")), 1)
-
-    def test_timer_runs_every_five_minutes(self) -> None:
-        self.assertIn("OnUnitActiveSec=5min", archive.timer_text())
-
     def test_import_command_deduplicates_unchanged_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "archive"
@@ -291,15 +169,6 @@ def argparse_like(root: Path, **kwargs: Path) -> object:
     args.archive_root = str(root)
     args.source_root = str(kwargs.get("source_root", Path("/does/not/matter")))
     args.codex_dir = str(kwargs.get("codex_dir", Path("/does/not/matter")))
-    args.prompt_id = kwargs.get("prompt_id")
-    args.session_id = kwargs.get("session_id")
-    args.cwd = kwargs.get("cwd")
-    args.repo = kwargs.get("repo")
-    args.date = kwargs.get("date")
-    args.limit = kwargs.get("limit")
-    args.output = str(kwargs["output"]) if "output" in kwargs else None
-    args.export_path = str(kwargs["export_path"]) if "export_path" in kwargs else None
-    args.deep = bool(kwargs.get("deep", False))
     return args
 
 

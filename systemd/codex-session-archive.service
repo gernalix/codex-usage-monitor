@@ -4,7 +4,7 @@ Description=Import native Codex sessions into AI-readable archive
 [Service]
 Type=oneshot
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/python3 /home/daniele/projects/codex-usage-monitor/codex_usage_monitor.py sessions --archive-root /home/daniele/.local/share/codex-session-archive import
+ExecStart=/usr/bin/python3 /home/daniele/projects/codex-usage-monitor/codex_session_archive.py --archive-root /home/daniele/.local/share/codex-session-archive import
 TimeoutStartSec=300
 NoNewPrivileges=true
 PrivateTmp=true
