@@ -3,8 +3,8 @@ Description=Run Codex session archive import frequently
 
 [Timer]
 OnBootSec=1min
-OnUnitActiveSec=1min
-AccuracySec=15s
+OnUnitActiveSec=5min
+AccuracySec=30s
 Persistent=true
 Unit=codex-session-archive.service
 
