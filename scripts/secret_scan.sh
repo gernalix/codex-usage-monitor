@@ -14,7 +14,7 @@ matches="$(
     --exclude='*.db-shm' \
     --exclude='*.sqlite-wal' \
     --exclude='*.sqlite-shm' \
-    '(sk-[A-Za-z0-9_-]{20,}|[0-9]{6,}:[A-Za-z0-9_-]{20,}|gh[opsu]_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|AKIA[0-9A-Z]{16})' \
+    '(sk-(proj-)?[A-Za-z0-9_-]{32,}|[0-9]{6,}:[A-Za-z0-9_-]{20,}|gh[opsu]_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|AKIA[0-9A-Z]{16})' \
     "$root" || true
 )"
 
