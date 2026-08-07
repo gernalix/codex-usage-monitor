@@ -16,6 +16,7 @@ import re
 import secrets
 import shutil
 import socket
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -698,6 +699,8 @@ def init_db(cfg: Config) -> None:
                 created_at_utc TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_notification_events_key_created ON notification_events(event_key, created_at_utc);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_events_quota_v2_sent_key ON notification_events(event_key) WHERE sent=1 AND event_key LIKE 'quota_change:v2:%';
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_events_quota_v2_sending_key ON notification_events(event_key) WHERE decision='sending' AND event_key LIKE 'quota_change:v2:%';
 
             CREATE TABLE IF NOT EXISTS imports (
                 import_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -885,6 +888,18 @@ def notification_recently_sent(con: sqlite3.Connection, event_key: str, cooldown
     return False
 
 
+def normalize_number(value: Any) -> str:
+    if value is None:
+        return "unavailable"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value).strip()
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:g}"
+
+
 def fmt_value(value: Any, suffix: str = "") -> str:
     if value is None:
         return "unavailable"
@@ -914,12 +929,52 @@ def snapshot_message_lines(row: sqlite3.Row, *, include_source: bool = False) ->
     ]
 
 
+def quota_notification_state(row: sqlite3.Row) -> dict[str, str]:
+    return {
+        "weekly_remaining": normalize_number(row["weekly_remaining_percent"]),
+        "weekly_reset": format_display_datetime(row["weekly_reset_at_utc"]),
+        "usage_limit_resets_available": normalize_number(row["usage_limit_resets_available"]),
+    }
+
+
+def quota_state_event_key(state: dict[str, str]) -> str:
+    payload = json.dumps(state, sort_keys=True, separators=(",", ":"))
+    return f"quota_change:v2:{hashlib.sha256(payload.encode()).hexdigest()}"
+
+
+def quota_state_from_message(message: str) -> dict[str, str] | None:
+    values: dict[str, str] = {}
+    for line in message.splitlines():
+        if line.startswith("Weekly remaining: "):
+            values["weekly_remaining"] = normalize_number(line.removeprefix("Weekly remaining: ").removesuffix("%"))
+        elif line.startswith("Weekly reset: "):
+            values["weekly_reset"] = line.removeprefix("Weekly reset: ").strip()
+        elif line.startswith("Usage limit resets available: "):
+            values["usage_limit_resets_available"] = normalize_number(
+                line.removeprefix("Usage limit resets available: ").strip()
+            )
+    required = {"weekly_remaining", "weekly_reset", "usage_limit_resets_available"}
+    return values if required <= values.keys() else None
+
+
+def last_notified_quota_state(con: sqlite3.Connection) -> dict[str, str] | None:
+    row = con.execute(
+        """
+        SELECT message FROM notification_events
+        WHERE event_type='quota_change' AND sent=1
+        ORDER BY created_at_utc DESC, notification_id DESC LIMIT 1
+        """
+    ).fetchone()
+    if not row:
+        return None
+    return quota_state_from_message(row["message"])
+
+
 def build_notification_events(cfg: Config, con: sqlite3.Connection, snapshot_id: int) -> list[tuple[str, str, str, str]]:
     current = con.execute("SELECT * FROM quota_snapshots WHERE snapshot_id=?", (snapshot_id,)).fetchone()
     if current is None:
         return []
     events: list[tuple[str, str, str, str]] = []
-    reset_count_text = "unavailable" if current["usage_limit_resets_available"] is None else str(current["usage_limit_resets_available"])
     if current["acquisition_status"] != "ok":
         failures = consecutive_failures(con)
         if failures >= cfg.notify_failure_after_runs:
@@ -934,33 +989,15 @@ def build_notification_events(cfg: Config, con: sqlite3.Connection, snapshot_id:
         return events
     previous = latest_ok_before(con, snapshot_id)
     if previous:
-        if previous["weekly_remaining_percent"] != current["weekly_remaining_percent"] or previous["weekly_reset_at_utc"] != current["weekly_reset_at_utc"]:
+        current_state = quota_notification_state(current)
+        previous_state = last_notified_quota_state(con) or quota_notification_state(previous)
+        if previous_state != current_state:
             events.append(
                 (
-                    f"quota_change:{current['weekly_remaining_percent']}:{current['weekly_reset_at_utc']}",
+                    quota_state_event_key(current_state),
                     "quota_change",
                     "Codex weekly quota changed",
                     "\n".join(snapshot_message_lines(current)),
-                )
-            )
-        previous_reset_count = previous["usage_limit_resets_available"]
-        current_reset_count = current["usage_limit_resets_available"]
-        if (
-            previous_reset_count is not None
-            and current_reset_count is not None
-            and previous_reset_count != current_reset_count
-        ):
-            events.append(
-                (
-                    f"reset_count_change:{previous['usage_limit_resets_available']}->{current['usage_limit_resets_available']}",
-                    "reset_count_change",
-                    "Codex usage reset count changed",
-                    "\n".join(
-                        [
-                            f"Usage limit resets available: {previous['usage_limit_resets_available']} -> {current['usage_limit_resets_available']}",
-                            *snapshot_message_lines(current),
-                        ]
-                    ),
                 )
             )
     reset_raw = current["weekly_reset_at_utc"]
@@ -980,6 +1017,46 @@ def build_notification_events(cfg: Config, con: sqlite3.Connection, snapshot_id:
         except ValueError:
             pass
     return events
+
+
+def claim_notification_event(
+    con: sqlite3.Connection,
+    snapshot_id: int,
+    event_key: str,
+    event_type: str,
+    title: str,
+    message: str,
+) -> int | None:
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        existing = con.execute(
+            "SELECT notification_id FROM notification_events WHERE event_key=? AND (sent=1 OR decision='sending') LIMIT 1",
+            (event_key,),
+        ).fetchone()
+        if existing:
+            con.execute(
+                """
+                INSERT INTO notification_events
+                (snapshot_id,event_key,event_type,title,message,decision,sent,detail,created_at_utc)
+                VALUES (?,?,?,?,?,?,?,?,?)
+                """,
+                (snapshot_id, event_key, event_type, title, message, "deduped", 0, "already sent or sending", utc_stamp()),
+            )
+            con.commit()
+            return None
+        cur = con.execute(
+            """
+            INSERT INTO notification_events
+            (snapshot_id,event_key,event_type,title,message,decision,sent,detail,created_at_utc)
+            VALUES (?,?,?,?,?,?,?,?,?)
+            """,
+            (snapshot_id, event_key, event_type, title, message, "sending", 0, "claimed", utc_stamp()),
+        )
+        con.commit()
+        return int(cur.lastrowid)
+    except Exception:
+        con.rollback()
+        raise
 
 
 def load_telegram_helper(path: Path) -> ModuleType:
@@ -1011,7 +1088,12 @@ def dispatch_notifications(cfg: Config, con: sqlite3.Connection, snapshot_id: in
     if not cfg.telegram_enabled:
         return
     for event_key, event_type, title, message in build_notification_events(cfg, con, snapshot_id):
-        if notification_recently_sent(con, event_key, cfg.notification_cooldown_minutes):
+        notification_id: int | None = None
+        if event_key.startswith("quota_change:v2:"):
+            notification_id = claim_notification_event(con, snapshot_id, event_key, event_type, title, message)
+            if notification_id is None:
+                continue
+        elif notification_recently_sent(con, event_key, cfg.notification_cooldown_minutes):
             con.execute(
                 """
                 INSERT INTO notification_events
@@ -1033,14 +1115,24 @@ def dispatch_notifications(cfg: Config, con: sqlite3.Connection, snapshot_id: in
             except Exception as exc:
                 detail = sanitize(exc, 700)
                 decision = "failed"
-        con.execute(
-            """
-            INSERT INTO notification_events
-            (snapshot_id,event_key,event_type,title,message,decision,sent,detail,created_at_utc)
-            VALUES (?,?,?,?,?,?,?,?,?)
-            """,
-            (snapshot_id, event_key, event_type, title, message, decision, 1 if sent else 0, detail, utc_stamp()),
-        )
+        if notification_id is None:
+            con.execute(
+                """
+                INSERT INTO notification_events
+                (snapshot_id,event_key,event_type,title,message,decision,sent,detail,created_at_utc)
+                VALUES (?,?,?,?,?,?,?,?,?)
+                """,
+                (snapshot_id, event_key, event_type, title, message, decision, 1 if sent else 0, detail, utc_stamp()),
+            )
+        else:
+            con.execute(
+                """
+                UPDATE notification_events
+                SET decision=?, sent=?, detail=?
+                WHERE notification_id=?
+                """,
+                (decision, 1 if sent else 0, detail, notification_id),
+            )
         con.commit()
 
 

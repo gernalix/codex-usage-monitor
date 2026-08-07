@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 import codex_usage_monitor as monitor
 
@@ -24,6 +25,42 @@ class ResetCountParsingTests(unittest.TestCase):
             notify_failure_after_runs=3,
             notification_cooldown_minutes=60,
         )
+
+    def insert_reading(
+        self,
+        con,
+        run_id: int,
+        used: object,
+        remaining: object,
+        reset: object,
+        resets: object,
+    ) -> int:
+        digest = f"{used}:{remaining}:{reset}:{resets}"
+        reading = monitor.QuotaReading(used, remaining, reset, resets, "test", digest, "", (), None)
+        return monitor.insert_snapshot(con, run_id, "ok", reading)
+
+    def insert_sent_quota_notification(self, con, snapshot_id: int) -> None:
+        row = con.execute("SELECT * FROM quota_snapshots WHERE snapshot_id=?", (snapshot_id,)).fetchone()
+        state = monitor.quota_notification_state(row)
+        con.execute(
+            """
+            INSERT INTO notification_events
+            (snapshot_id,event_key,event_type,title,message,decision,sent,detail,created_at_utc)
+            VALUES (?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                snapshot_id,
+                monitor.quota_state_event_key(state),
+                "quota_change",
+                "Codex weekly quota changed",
+                "\n".join(monitor.snapshot_message_lines(row)),
+                "sent",
+                1,
+                "test",
+                monitor.utc_stamp(),
+            ),
+        )
+        con.commit()
 
     def test_structured_one_reset(self) -> None:
         payload = {"rateLimitResetCredits": {"availableCount": 1, "credits": [{"status": "available"}]}}
@@ -88,13 +125,64 @@ class ResetCountParsingTests(unittest.TestCase):
             monitor.init_db(cfg)
             with monitor.connect_db(cfg) as con:
                 run_id = monitor.start_run(con)
-                older = monitor.QuotaReading(31, 69, "2026-08-08T07:59:53Z", 1, "test", "older", "", (), None)
-                current = monitor.QuotaReading(32, 69, "2026-08-08T07:59:53Z", 1, "test", "current", "", (), None)
-                monitor.insert_snapshot(con, run_id, "ok", older)
-                snapshot_id = monitor.insert_snapshot(con, run_id, "ok", current)
+                older_id = self.insert_reading(con, run_id, 31, 69, "2026-08-08T07:59:53Z", 1)
+                self.insert_sent_quota_notification(con, older_id)
+                snapshot_id = self.insert_reading(con, run_id, 32, 69, "2026-08-08T07:59:53Z", 1)
                 events = monitor.build_notification_events(cfg, con, snapshot_id)
             quota_messages = [event[3] for event in events if event[1] == "quota_change"]
             self.assertEqual(quota_messages, [])
+
+    def test_identical_notified_quota_state_does_not_notify(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_cfg(tmp)
+            monitor.init_db(cfg)
+            with monitor.connect_db(cfg) as con:
+                run_id = monitor.start_run(con)
+                older_id = self.insert_reading(con, run_id, 11, 89, "2026-08-12T10:06:00Z", 0)
+                self.insert_sent_quota_notification(con, older_id)
+                snapshot_id = self.insert_reading(con, run_id, 12, "89", "2026-08-12T12:06:00+02:00", "0")
+                events = monitor.build_notification_events(cfg, con, snapshot_id)
+            quota_messages = [event[3] for event in events if event[1] == "quota_change"]
+            self.assertEqual(quota_messages, [])
+
+    def test_weekly_remaining_change_notifies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_cfg(tmp)
+            monitor.init_db(cfg)
+            with monitor.connect_db(cfg) as con:
+                run_id = monitor.start_run(con)
+                older_id = self.insert_reading(con, run_id, 11, 89, "2026-08-12T10:06:00Z", 0)
+                self.insert_sent_quota_notification(con, older_id)
+                snapshot_id = self.insert_reading(con, run_id, 11, 88, "2026-08-12T10:06:00Z", 0)
+                events = monitor.build_notification_events(cfg, con, snapshot_id)
+            quota_messages = [event[3] for event in events if event[1] == "quota_change"]
+            self.assertEqual(len(quota_messages), 1)
+
+    def test_weekly_reset_change_notifies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_cfg(tmp)
+            monitor.init_db(cfg)
+            with monitor.connect_db(cfg) as con:
+                run_id = monitor.start_run(con)
+                older_id = self.insert_reading(con, run_id, 11, 89, "2026-08-12T10:06:00Z", 0)
+                self.insert_sent_quota_notification(con, older_id)
+                snapshot_id = self.insert_reading(con, run_id, 11, 89, "2026-08-12T11:06:00Z", 0)
+                events = monitor.build_notification_events(cfg, con, snapshot_id)
+            quota_messages = [event[3] for event in events if event[1] == "quota_change"]
+            self.assertEqual(len(quota_messages), 1)
+
+    def test_usage_limit_reset_count_change_notifies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_cfg(tmp)
+            monitor.init_db(cfg)
+            with monitor.connect_db(cfg) as con:
+                run_id = monitor.start_run(con)
+                older_id = self.insert_reading(con, run_id, 11, 89, "2026-08-12T10:06:00Z", 0)
+                self.insert_sent_quota_notification(con, older_id)
+                snapshot_id = self.insert_reading(con, run_id, 11, 89, "2026-08-12T10:06:00Z", 1)
+                events = monitor.build_notification_events(cfg, con, snapshot_id)
+            quota_messages = [event[3] for event in events if event[1] == "quota_change"]
+            self.assertEqual(len(quota_messages), 1)
 
     def test_quota_change_notification_includes_relevant_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -102,10 +190,9 @@ class ResetCountParsingTests(unittest.TestCase):
             monitor.init_db(cfg)
             with monitor.connect_db(cfg) as con:
                 run_id = monitor.start_run(con)
-                older = monitor.QuotaReading(31, 69, "2026-08-08T07:59:53Z", 1, "test", "older", "", (), None)
-                current = monitor.QuotaReading(32, 68, "2026-08-08T07:59:53Z", 1, "test", "current", "", (), None)
-                monitor.insert_snapshot(con, run_id, "ok", older)
-                snapshot_id = monitor.insert_snapshot(con, run_id, "ok", current)
+                older_id = self.insert_reading(con, run_id, 31, 69, "2026-08-08T07:59:53Z", 1)
+                self.insert_sent_quota_notification(con, older_id)
+                snapshot_id = self.insert_reading(con, run_id, 32, 68, "2026-08-08T07:59:53Z", 1)
                 events = monitor.build_notification_events(cfg, con, snapshot_id)
             quota_messages = [event[3] for event in events if event[1] == "quota_change"]
             self.assertTrue(quota_messages)
@@ -114,21 +201,28 @@ class ResetCountParsingTests(unittest.TestCase):
             self.assertIn("Usage limit resets available: 1", quota_messages[0])
             self.assertNotIn("Weekly used", quota_messages[0])
 
-    def test_reset_count_change_triggers_distinct_notification(self) -> None:
+    def test_repeated_dispatch_of_same_new_state_sends_at_most_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self.make_cfg(tmp)
             monitor.init_db(cfg)
-            with monitor.connect_db(cfg) as con:
+            sent_messages: list[tuple[str, str]] = []
+            with monitor.connect_db(cfg) as con, mock.patch.object(
+                monitor,
+                "send_telegram",
+                side_effect=lambda _cfg, title, message: sent_messages.append((title, message)) or "sent",
+            ):
                 run_id = monitor.start_run(con)
-                older = monitor.QuotaReading(32, 68, "2026-08-08T07:59:53Z", 1, "test", "older-reset", "", (), None)
-                current = monitor.QuotaReading(32, 68, "2026-08-08T07:59:53Z", 2, "test", "current-reset", "", (), None)
-                monitor.insert_snapshot(con, run_id, "ok", older)
-                snapshot_id = monitor.insert_snapshot(con, run_id, "ok", current)
-                events = monitor.build_notification_events(cfg, con, snapshot_id)
-            reset_events = [event for event in events if event[1] == "reset_count_change"]
-            self.assertEqual(len(reset_events), 1)
-            self.assertEqual(reset_events[0][0], "reset_count_change:1->2")
-            self.assertIn("Usage limit resets available: 1 -> 2", reset_events[0][3])
+                older_id = self.insert_reading(con, run_id, 11, 89, "2026-08-12T10:06:00Z", 0)
+                self.insert_sent_quota_notification(con, older_id)
+                first_id = self.insert_reading(con, run_id, 11, 88, "2026-08-12T10:06:00Z", 0)
+                monitor.dispatch_notifications(cfg, con, first_id)
+                second_id = self.insert_reading(con, run_id, 12, 88, "2026-08-12T12:06:00+02:00", 0)
+                monitor.dispatch_notifications(cfg, con, second_id)
+                sent_events = con.execute(
+                    "SELECT COUNT(*) FROM notification_events WHERE event_type='quota_change' AND sent=1"
+                ).fetchone()[0]
+            self.assertEqual(len(sent_messages), 1)
+            self.assertEqual(sent_events, 2)
 
     def test_snapshot_message_has_compact_telegram_format(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
