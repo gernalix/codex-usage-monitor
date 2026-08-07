@@ -82,7 +82,21 @@ class ResetCountParsingTests(unittest.TestCase):
         self.assertIsNone(reset)
         self.assertTrue(warnings)
 
-    def test_quota_change_notification_includes_reset_count(self) -> None:
+    def test_weekly_used_only_change_does_not_notify(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_cfg(tmp)
+            monitor.init_db(cfg)
+            with monitor.connect_db(cfg) as con:
+                run_id = monitor.start_run(con)
+                older = monitor.QuotaReading(31, 69, "2026-08-08T07:59:53Z", 1, "test", "older", "", (), None)
+                current = monitor.QuotaReading(32, 69, "2026-08-08T07:59:53Z", 1, "test", "current", "", (), None)
+                monitor.insert_snapshot(con, run_id, "ok", older)
+                snapshot_id = monitor.insert_snapshot(con, run_id, "ok", current)
+                events = monitor.build_notification_events(cfg, con, snapshot_id)
+            quota_messages = [event[3] for event in events if event[1] == "quota_change"]
+            self.assertEqual(quota_messages, [])
+
+    def test_quota_change_notification_includes_relevant_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self.make_cfg(tmp)
             monitor.init_db(cfg)
@@ -95,8 +109,10 @@ class ResetCountParsingTests(unittest.TestCase):
                 events = monitor.build_notification_events(cfg, con, snapshot_id)
             quota_messages = [event[3] for event in events if event[1] == "quota_change"]
             self.assertTrue(quota_messages)
-            self.assertIn("Weekly reset: 08-08-26 07:59", quota_messages[0])
+            self.assertIn("Weekly remaining: 68%", quota_messages[0])
+            self.assertIn("Weekly reset: 08-08-26 09:59", quota_messages[0])
             self.assertIn("Usage limit resets available: 1", quota_messages[0])
+            self.assertNotIn("Weekly used", quota_messages[0])
 
     def test_reset_count_change_triggers_distinct_notification(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -127,8 +143,12 @@ class ResetCountParsingTests(unittest.TestCase):
                 message = "\n".join(monitor.snapshot_message_lines(row))
             self.assertEqual(
                 message,
-                "Weekly remaining: 68%\nWeekly reset: 08-08-26 07:59\nUsage limit resets available: 1",
+                "Weekly remaining: 68%\nWeekly reset: 08-08-26 09:59\nUsage limit resets available: 1",
             )
+
+    def test_weekly_reset_display_uses_copenhagen_timezone(self) -> None:
+        self.assertEqual(monitor.format_display_datetime("2026-08-12T10:06:00Z"), "12-08-26 12:06")
+        self.assertEqual(monitor.format_display_datetime("2026-12-12T10:06:00Z"), "12-12-26 11:06")
 
     def test_init_db_creates_canonical_datasette_views(self) -> None:
         expected = {

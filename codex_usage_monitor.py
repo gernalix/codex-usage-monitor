@@ -24,6 +24,7 @@ import time
 from dataclasses import dataclass
 from types import ModuleType
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 VERSION = "2026.08.02"
@@ -34,6 +35,7 @@ DEFAULT_TELEGRAM_HELPER = Path("/home/ubuntu/telegram_notify.py")
 DEFAULT_CODEX_BIN = "/usr/bin/codex"
 DEFAULT_APP_SERVER_PORT = 38655
 SOURCE_METHOD = "codex-app-server account/rateLimits/read"
+DISPLAY_TZ = ZoneInfo("Europe/Copenhagen")
 
 
 class MonitorError(RuntimeError):
@@ -898,7 +900,9 @@ def format_display_datetime(value: Any) -> str:
         parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return str(value)
-    return parsed.astimezone(dt.timezone.utc).strftime("%d-%m-%y %H:%M")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(DISPLAY_TZ).strftime("%d-%m-%y %H:%M")
 
 
 def snapshot_message_lines(row: sqlite3.Row, *, include_source: bool = False) -> list[str]:
@@ -930,18 +934,13 @@ def build_notification_events(cfg: Config, con: sqlite3.Connection, snapshot_id:
         return events
     previous = latest_ok_before(con, snapshot_id)
     if previous:
-        if previous["weekly_used_percent"] != current["weekly_used_percent"] or previous["weekly_reset_at_utc"] != current["weekly_reset_at_utc"]:
+        if previous["weekly_remaining_percent"] != current["weekly_remaining_percent"] or previous["weekly_reset_at_utc"] != current["weekly_reset_at_utc"]:
             events.append(
                 (
-                    f"quota_change:{current['weekly_used_percent']}:{current['weekly_reset_at_utc']}",
+                    f"quota_change:{current['weekly_remaining_percent']}:{current['weekly_reset_at_utc']}",
                     "quota_change",
                     "Codex weekly quota changed",
-                    "\n".join(
-                        [
-                            f"Weekly used: {fmt_value(previous['weekly_used_percent'], '%')} -> {fmt_value(current['weekly_used_percent'], '%')}",
-                            *snapshot_message_lines(current),
-                        ]
-                    ),
+                    "\n".join(snapshot_message_lines(current)),
                 )
             )
         previous_reset_count = previous["usage_limit_resets_available"]
