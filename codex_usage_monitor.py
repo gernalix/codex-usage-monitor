@@ -28,7 +28,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 
-VERSION = "2026.08.02"
+VERSION = "2026.09.03"
 APP_NAME = "codex-usage-monitor"
 DEFAULT_DB = Path("/home/ubuntu/sync_root/db/codex_usage_monitor.db")
 DEFAULT_STATE_DIR = Path("/home/ubuntu/.local/state/codex-usage-monitor")
@@ -90,6 +90,21 @@ class QuotaReading:
     sanitized_excerpt: str
     parse_warnings: tuple[str, ...]
     payload: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class RateLimitSnapshot:
+    limit_id: str
+    limit_name: str | None
+    model_name: str | None
+    plan_type: str | None
+    limit_family: str | None
+    window_name: str
+    window_duration_minutes: int | None
+    used_percent: float | None
+    remaining_percent: float | None
+    reset_at_utc: str | None
+    source_path: str
 
 
 class ExclusiveLock:
@@ -189,6 +204,15 @@ def sanitize(text: Any, limit: int = 1000) -> str:
         redacted = pattern.sub(replacement, redacted)
     collapsed = " ".join(redacted.split())
     return collapsed if len(collapsed) <= limit else collapsed[: max(0, limit - 3)] + "..."
+
+
+def sanitized_payload_json(payload: dict[str, Any]) -> str:
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    redacted = raw.replace("\x00", " ")
+    for pattern, replacement in SENSITIVE_PATTERNS:
+        redacted = pattern.sub(replacement, redacted)
+    json.loads(redacted)
+    return redacted
 
 
 def parse_float(value: Any) -> float | None:
@@ -526,6 +550,70 @@ def iter_limit_windows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return windows
 
 
+def optional_text(value: Any) -> str | None:
+    if value is None or isinstance(value, (dict, list)):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def rate_limit_snapshots_from_payload(payload: dict[str, Any]) -> list[RateLimitSnapshot]:
+    rows: list[RateLimitSnapshot] = []
+
+    def add(root: dict[str, Any], raw_id: Any, window_name: str, raw: Any, source_path: str) -> None:
+        normalized = normalize_rate_window(raw)
+        if normalized is None:
+            return
+        limit_id = optional_text(root.get("limitId")) or optional_text(raw_id) or "unknown"
+        used = parse_float(normalized.get("usedPercent"))
+        remaining = parse_float(normalized.get("remainingPercent"))
+        if used is None and remaining is not None:
+            used = clamp_percent(100.0 - remaining)
+        if remaining is None and used is not None:
+            remaining = clamp_percent(100.0 - used)
+        duration_raw = normalized.get("windowDurationMins")
+        try:
+            duration = int(duration_raw) if duration_raw is not None else None
+        except (TypeError, ValueError):
+            duration = None
+        rows.append(
+            RateLimitSnapshot(
+                limit_id=limit_id,
+                limit_name=optional_text(root.get("limitName") or root.get("name")),
+                model_name=optional_text(root.get("modelName") or root.get("model_name") or root.get("model")),
+                plan_type=optional_text(root.get("planType") or root.get("plan_type") or payload.get("planType") or payload.get("plan_type")),
+                limit_family=optional_text(
+                    root.get("rateLimitReachedType")
+                    or root.get("rate_limit_reached_type")
+                    or root.get("limitType")
+                    or root.get("limit_type")
+                    or root.get("family")
+                ),
+                window_name=window_name,
+                window_duration_minutes=duration,
+                used_percent=clamp_percent(used) if used is not None else None,
+                remaining_percent=clamp_percent(remaining) if remaining is not None else None,
+                reset_at_utc=epoch_to_utc_iso(normalized.get("resetsAt")),
+                source_path=source_path,
+            )
+        )
+
+    result = payload.get("rateLimits") if isinstance(payload.get("rateLimits"), dict) else payload
+    if isinstance(result, dict):
+        root_id = optional_text(result.get("limitId")) or "codex"
+        add(result, root_id, "primary", result.get("primary"), "rateLimits.primary")
+        add(result, root_id, "secondary", result.get("secondary"), "rateLimits.secondary")
+    by_limit = payload.get("rateLimitsByLimitId")
+    if isinstance(by_limit, dict):
+        for raw_id, item in by_limit.items():
+            if not isinstance(item, dict):
+                continue
+            limit_id = optional_text(item.get("limitId")) or optional_text(raw_id) or "unknown"
+            add(item, limit_id, "primary", item.get("primary"), f"rateLimitsByLimitId.{limit_id}.primary")
+            add(item, limit_id, "secondary", item.get("secondary"), f"rateLimitsByLimitId.{limit_id}.secondary")
+    return rows
+
+
 def choose_weekly_window(payload: dict[str, Any]) -> tuple[float | None, float | None, str | None, list[str]]:
     warnings: list[str] = []
     candidates = []
@@ -648,6 +736,12 @@ def connect_db(cfg: Config) -> sqlite3.Connection:
     return con
 
 
+def ensure_column(con: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {row["name"] for row in con.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in columns:
+        con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def init_db(cfg: Config) -> None:
     with connect_db(cfg) as con:
         con.executescript(
@@ -677,6 +771,7 @@ def init_db(cfg: Config) -> None:
                 usage_limit_resets_available INTEGER,
                 sanitized_error TEXT,
                 sanitized_excerpt TEXT,
+                sanitized_payload_json TEXT,
                 source_payload_sha256 TEXT,
                 parse_warnings TEXT,
                 provenance TEXT NOT NULL DEFAULT 'live',
@@ -685,6 +780,26 @@ def init_db(cfg: Config) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_quota_snapshots_acquired ON quota_snapshots(acquired_at_utc);
             CREATE INDEX IF NOT EXISTS idx_quota_snapshots_status ON quota_snapshots(acquisition_status, acquired_at_utc);
+
+            CREATE TABLE IF NOT EXISTS rate_limit_snapshots (
+                rate_limit_snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_id INTEGER NOT NULL REFERENCES quota_snapshots(snapshot_id) ON DELETE CASCADE,
+                limit_id TEXT NOT NULL,
+                limit_name TEXT,
+                model_name TEXT,
+                plan_type TEXT,
+                limit_family TEXT,
+                window_name TEXT NOT NULL,
+                window_duration_minutes INTEGER,
+                used_percent REAL,
+                remaining_percent REAL,
+                reset_at_utc TEXT,
+                source_path TEXT NOT NULL,
+                created_at_utc TEXT NOT NULL,
+                UNIQUE(snapshot_id, limit_id, window_name, source_path)
+            );
+            CREATE INDEX IF NOT EXISTS idx_rate_limit_snapshots_snapshot ON rate_limit_snapshots(snapshot_id);
+            CREATE INDEX IF NOT EXISTS idx_rate_limit_snapshots_limit_time ON rate_limit_snapshots(limit_id, reset_at_utc);
 
             CREATE TABLE IF NOT EXISTS notification_events (
                 notification_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -711,6 +826,11 @@ def init_db(cfg: Config) -> None:
                 source_sha256 TEXT,
                 backup_path TEXT
             );
+            """
+        )
+        ensure_column(con, "quota_snapshots", "sanitized_payload_json", "TEXT")
+        con.executescript(
+            """
 
             DROP VIEW IF EXISTS latest_state;
             DROP VIEW IF EXISTS history;
@@ -718,6 +838,9 @@ def init_db(cfg: Config) -> None:
             DROP VIEW IF EXISTS recent_failures;
             DROP VIEW IF EXISTS quota_overview;
             DROP VIEW IF EXISTS quota_diagnostics;
+            DROP VIEW IF EXISTS rate_limit_history;
+            DROP VIEW IF EXISTS quota_temporal_metrics;
+            DROP VIEW IF EXISTS failure_diagnostics;
 
             CREATE VIEW latest_state AS
             SELECT *
@@ -777,6 +900,159 @@ def init_db(cfg: Config) -> None:
                    provenance
             FROM quota_snapshots
             ORDER BY acquired_at_utc DESC, snapshot_id DESC;
+
+            CREATE VIEW rate_limit_history AS
+            SELECT qs.snapshot_id,
+                   qs.acquired_at_utc,
+                   qs.acquisition_status,
+                   qs.provenance,
+                   rls.limit_id,
+                   rls.limit_name,
+                   rls.model_name,
+                   rls.plan_type,
+                   rls.limit_family,
+                   rls.window_name,
+                   rls.window_duration_minutes,
+                   rls.used_percent,
+                   rls.remaining_percent,
+                   rls.reset_at_utc,
+                   rls.source_path
+            FROM rate_limit_snapshots rls
+            JOIN quota_snapshots qs ON qs.snapshot_id = rls.snapshot_id
+            ORDER BY qs.acquired_at_utc DESC, qs.snapshot_id DESC, rls.limit_id, rls.window_name;
+
+            CREATE VIEW quota_temporal_metrics AS
+            WITH samples AS (
+                SELECT snapshot_id, acquired_at_utc, 'weekly_general' AS limit_id, 'secondary' AS window_name,
+                       10080 AS window_duration_minutes, weekly_used_percent AS used_percent,
+                       weekly_remaining_percent AS remaining_percent, weekly_reset_at_utc AS reset_at_utc
+                FROM quota_snapshots
+                WHERE acquisition_status = 'ok' AND weekly_used_percent IS NOT NULL
+                UNION ALL
+                SELECT qs.snapshot_id, qs.acquired_at_utc, rls.limit_id, rls.window_name,
+                       rls.window_duration_minutes, rls.used_percent, rls.remaining_percent, rls.reset_at_utc
+                FROM rate_limit_snapshots rls
+                JOIN quota_snapshots qs ON qs.snapshot_id = rls.snapshot_id
+                WHERE qs.acquisition_status = 'ok' AND rls.used_percent IS NOT NULL
+            ),
+            latest AS (
+                SELECT *
+                FROM (
+                    SELECT samples.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY limit_id, window_name, window_duration_minutes
+                               ORDER BY acquired_at_utc DESC, snapshot_id DESC
+                           ) AS rn
+                    FROM samples
+                )
+                WHERE rn = 1
+            ),
+            anchors AS (
+                SELECT latest.*,
+                       (
+                           SELECT used_percent FROM samples s
+                           WHERE s.limit_id = latest.limit_id
+                             AND s.window_name = latest.window_name
+                             AND COALESCE(s.window_duration_minutes, -1) = COALESCE(latest.window_duration_minutes, -1)
+                             AND s.reset_at_utc = latest.reset_at_utc
+                             AND julianday(s.acquired_at_utc) <= julianday(latest.acquired_at_utc) - (1.0 / 24.0)
+                           ORDER BY s.acquired_at_utc DESC, s.snapshot_id DESC LIMIT 1
+                       ) AS used_1h,
+                       (
+                           SELECT used_percent FROM samples s
+                           WHERE s.limit_id = latest.limit_id
+                             AND s.window_name = latest.window_name
+                             AND COALESCE(s.window_duration_minutes, -1) = COALESCE(latest.window_duration_minutes, -1)
+                             AND s.reset_at_utc = latest.reset_at_utc
+                             AND julianday(s.acquired_at_utc) <= julianday(latest.acquired_at_utc) - (6.0 / 24.0)
+                           ORDER BY s.acquired_at_utc DESC, s.snapshot_id DESC LIMIT 1
+                       ) AS used_6h,
+                       (
+                           SELECT used_percent FROM samples s
+                           WHERE s.limit_id = latest.limit_id
+                             AND s.window_name = latest.window_name
+                             AND COALESCE(s.window_duration_minutes, -1) = COALESCE(latest.window_duration_minutes, -1)
+                             AND s.reset_at_utc = latest.reset_at_utc
+                             AND julianday(s.acquired_at_utc) <= julianday(latest.acquired_at_utc) - 1.0
+                           ORDER BY s.acquired_at_utc DESC, s.snapshot_id DESC LIMIT 1
+                       ) AS used_24h
+                FROM latest
+            ),
+            computed AS (
+                SELECT *,
+                       CASE WHEN used_1h IS NOT NULL AND used_percent >= used_1h THEN used_percent - used_1h END AS consumption_1h_percent,
+                       CASE WHEN used_6h IS NOT NULL AND used_percent >= used_6h THEN used_percent - used_6h END AS consumption_6h_percent,
+                       CASE WHEN used_24h IS NOT NULL AND used_percent >= used_24h THEN used_percent - used_24h END AS consumption_24h_percent,
+                       CASE
+                           WHEN reset_at_utc IS NOT NULL AND window_duration_minutes IS NOT NULL
+                           THEN (julianday(acquired_at_utc) - (julianday(reset_at_utc) - (window_duration_minutes / 1440.0))) * 24.0
+                       END AS elapsed_hours,
+                       CASE WHEN reset_at_utc IS NOT NULL THEN (julianday(reset_at_utc) - julianday(acquired_at_utc)) * 24.0 END AS remaining_hours
+                FROM anchors
+            )
+            SELECT limit_id,
+                   window_name,
+                   snapshot_id AS latest_snapshot_id,
+                   acquired_at_utc AS latest_acquired_at_utc,
+                   reset_at_utc,
+                   window_duration_minutes,
+                   used_percent,
+                   remaining_percent,
+                   consumption_1h_percent,
+                   consumption_6h_percent,
+                   consumption_24h_percent,
+                   CASE WHEN elapsed_hours > 0 THEN used_percent / elapsed_hours END AS average_consumption_per_hour_since_reset,
+                   COALESCE(consumption_1h_percent, consumption_6h_percent / 6.0, consumption_24h_percent / 24.0) AS recent_consumption_per_hour,
+                   CASE
+                       WHEN elapsed_hours BETWEEN 0 AND (window_duration_minutes / 60.0)
+                       THEN ROUND(MIN(100.0, MAX(0.0, 100.0 * elapsed_hours / (window_duration_minutes / 60.0))), 3)
+                   END AS ideal_used_percent,
+                   CASE
+                       WHEN elapsed_hours BETWEEN 0 AND (window_duration_minutes / 60.0)
+                       THEN ROUND(used_percent - MIN(100.0, MAX(0.0, 100.0 * elapsed_hours / (window_duration_minutes / 60.0))), 3)
+                   END AS delta_vs_ideal_percent,
+                   CASE
+                       WHEN remaining_hours >= 0
+                       THEN ROUND(MIN(100.0, MAX(0.0, used_percent + COALESCE(consumption_1h_percent, consumption_6h_percent / 6.0, consumption_24h_percent / 24.0, CASE WHEN elapsed_hours > 0 THEN used_percent / elapsed_hours END) * remaining_hours)), 3)
+                   END AS projected_used_at_reset_percent,
+                   CASE
+                       WHEN reset_at_utc IS NULL OR window_duration_minutes IS NULL THEN 'UNKNOWN'
+                       WHEN elapsed_hours < 0 OR remaining_hours < 0 THEN 'UNKNOWN'
+                       ELSE 'OK'
+                   END AS metric_status
+            FROM computed
+            ORDER BY limit_id, window_name, window_duration_minutes;
+
+            CREATE VIEW failure_diagnostics AS
+            WITH ordered AS (
+                SELECT snapshot_id, acquired_at_utc, acquisition_status,
+                       ROW_NUMBER() OVER (ORDER BY acquired_at_utc DESC, snapshot_id DESC) AS rn
+                FROM quota_snapshots
+            ),
+            first_ok AS (
+                SELECT MIN(rn) AS rn FROM ordered WHERE acquisition_status = 'ok'
+            ),
+            current_failures AS (
+                SELECT * FROM ordered
+                WHERE acquisition_status != 'ok'
+                  AND rn < COALESCE((SELECT rn FROM first_ok), 1000000000)
+            ),
+            last_24h AS (
+                SELECT acquisition_status
+                FROM quota_snapshots
+                WHERE julianday(acquired_at_utc) >= julianday('now') - 1
+            )
+            SELECT (SELECT MAX(acquired_at_utc) FROM quota_snapshots WHERE acquisition_status = 'ok') AS last_success_at_utc,
+                   (SELECT COUNT(*) FROM current_failures) AS consecutive_failures,
+                   (SELECT MIN(acquired_at_utc) FROM current_failures) AS last_failure_streak_started_at_utc,
+                   CASE
+                       WHEN (SELECT COUNT(*) FROM current_failures) > 0
+                       THEN ROUND((julianday('now') - julianday((SELECT MIN(acquired_at_utc) FROM current_failures))) * 24.0 * 60.0, 3)
+                   END AS last_failure_streak_minutes,
+                   CASE
+                       WHEN (SELECT COUNT(*) FROM last_24h) > 0
+                       THEN ROUND(100.0 * (SELECT COUNT(*) FROM last_24h WHERE acquisition_status = 'ok') / (SELECT COUNT(*) FROM last_24h), 3)
+                   END AS availability_24h_percent;
             """
         )
         con.commit()
@@ -827,6 +1103,7 @@ def insert_snapshot(
         "usage_limit_resets_available": reading.usage_limit_resets_available if reading else None,
         "sanitized_error": sanitize(error, 700) if error else None,
         "sanitized_excerpt": reading.sanitized_excerpt if reading else None,
+        "sanitized_payload_json": sanitized_payload_json(reading.payload) if reading and reading.payload is not None else None,
         "source_payload_sha256": digest,
         "parse_warnings": "; ".join(reading.parse_warnings) if reading and reading.parse_warnings else None,
         "provenance": provenance,
@@ -836,8 +1113,7 @@ def insert_snapshot(
     placeholders = ",".join("?" for _ in values)
     try:
         cur = con.execute(f"INSERT INTO quota_snapshots ({columns}) VALUES ({placeholders})", list(values.values()))
-        con.commit()
-        return int(cur.lastrowid)
+        snapshot_id = int(cur.lastrowid)
     except sqlite3.IntegrityError:
         row = con.execute(
             """
@@ -847,7 +1123,43 @@ def insert_snapshot(
             """,
             (minute_text, digest, status, provenance),
         ).fetchone()
-        return int(row["snapshot_id"]) if row else 0
+        snapshot_id = int(row["snapshot_id"]) if row else 0
+    if snapshot_id and reading and reading.payload is not None:
+        insert_rate_limit_snapshots(con, snapshot_id, reading.payload)
+    con.commit()
+    return snapshot_id
+
+
+def insert_rate_limit_snapshots(con: sqlite3.Connection, snapshot_id: int, payload: dict[str, Any]) -> None:
+    rows = rate_limit_snapshots_from_payload(payload)
+    if not rows:
+        return
+    con.executemany(
+        """
+        INSERT OR IGNORE INTO rate_limit_snapshots
+        (snapshot_id,limit_id,limit_name,model_name,plan_type,limit_family,window_name,
+         window_duration_minutes,used_percent,remaining_percent,reset_at_utc,source_path,created_at_utc)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        [
+            (
+                snapshot_id,
+                row.limit_id,
+                row.limit_name,
+                row.model_name,
+                row.plan_type,
+                row.limit_family,
+                row.window_name,
+                row.window_duration_minutes,
+                row.used_percent,
+                row.remaining_percent,
+                row.reset_at_utc,
+                row.source_path,
+                utc_stamp(),
+            )
+            for row in rows
+        ],
+    )
 
 
 def latest_ok_before(con: sqlite3.Connection, snapshot_id: int) -> sqlite3.Row | None:

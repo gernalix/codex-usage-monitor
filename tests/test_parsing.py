@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime as dt
+import json
 import unittest
 import tempfile
 from pathlib import Path
@@ -38,6 +40,10 @@ class ResetCountParsingTests(unittest.TestCase):
         digest = f"{used}:{remaining}:{reset}:{resets}"
         reading = monitor.QuotaReading(used, remaining, reset, resets, "test", digest, "", (), None)
         return monitor.insert_snapshot(con, run_id, "ok", reading)
+
+    def reading_from_payload(self, payload: dict) -> monitor.QuotaReading:
+        reading = monitor.reading_from_payload(payload)
+        return reading
 
     def insert_sent_quota_notification(self, con, snapshot_id: int) -> None:
         row = con.execute("SELECT * FROM quota_snapshots WHERE snapshot_id=?", (snapshot_id,)).fetchone()
@@ -246,10 +252,13 @@ class ResetCountParsingTests(unittest.TestCase):
 
     def test_init_db_creates_canonical_datasette_views(self) -> None:
         expected = {
+            "failure_diagnostics",
             "history",
             "latest_state",
             "quota_diagnostics",
             "quota_overview",
+            "quota_temporal_metrics",
+            "rate_limit_history",
             "recent_failures",
             "reset_count_changes",
         }
@@ -287,6 +296,159 @@ class ResetCountParsingTests(unittest.TestCase):
         self.assertIn("weekly_remaining_percent", sql)
         self.assertIn("ORDER BY acquired_at_utc DESC, snapshot_id DESC", sql)
         self.assertNotIn("SELECT snapshot_id FROM quota_snapshots", sql)
+
+    def test_rate_limits_by_limit_id_are_persisted_dynamically(self) -> None:
+        payload = {
+            "rateLimitsByLimitId": {
+                "codex": {
+                    "limitName": "Codex",
+                    "planType": "pro",
+                    "primary": {"usedPercent": 5, "windowDurationMins": 300, "resetsAt": 1780000000},
+                    "secondary": {"remainingPercent": 80, "windowDurationMins": 10080, "resetsAt": 1780100000},
+                },
+                "future_unknown": {
+                    "limitId": "future_unknown",
+                    "modelName": "gpt-future",
+                    "limitType": "model",
+                    "primary": {"usedPercent": 12.5, "remainingPercent": 87.5, "windowDurationMins": 60, "resetsAt": 1780003600},
+                },
+            },
+            "rateLimitResetCredits": {"availableCount": 1},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_cfg(tmp)
+            monitor.init_db(cfg)
+            with monitor.connect_db(cfg) as con:
+                run_id = monitor.start_run(con)
+                snapshot_id = monitor.insert_snapshot(con, run_id, "ok", self.reading_from_payload(payload))
+                rows = con.execute(
+                    """
+                    SELECT limit_id, model_name, plan_type, limit_family, window_name, window_duration_minutes, used_percent, remaining_percent
+                    FROM rate_limit_snapshots
+                    WHERE snapshot_id=?
+                    ORDER BY limit_id, window_name
+                    """,
+                    (snapshot_id,),
+                ).fetchall()
+        self.assertEqual(len(rows), 3)
+        self.assertIn(("future_unknown", "gpt-future", None, "model", "primary", 60, 12.5, 87.5), [tuple(row) for row in rows])
+        self.assertIn(("codex", None, "pro", None, "secondary", 10080, 20.0, 80.0), [tuple(row) for row in rows])
+
+    def test_sanitized_payload_json_is_complete_valid_and_redacted(self) -> None:
+        payload = {
+            "message": "contact person@example.com token sk-" + "a" * 30,
+            "rateLimits": {
+                "limitId": "codex",
+                "secondary": {"usedPercent": 22, "windowDurationMins": 10080, "resetsAt": 1780100000},
+            },
+            "long": "x" * 1500,
+            "rateLimitResetCredits": {"availableCount": 0},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_cfg(tmp)
+            monitor.init_db(cfg)
+            with monitor.connect_db(cfg) as con:
+                run_id = monitor.start_run(con)
+                snapshot_id = monitor.insert_snapshot(con, run_id, "ok", self.reading_from_payload(payload))
+                row = con.execute("SELECT sanitized_excerpt, sanitized_payload_json FROM quota_snapshots WHERE snapshot_id=?", (snapshot_id,)).fetchone()
+        decoded = json.loads(row["sanitized_payload_json"])
+        self.assertEqual(decoded["long"], "x" * 1500)
+        self.assertIn("[EMAIL_REDACTED]", decoded["message"])
+        self.assertIn("[OPENAI_KEY_REDACTED]", decoded["message"])
+        self.assertNotIn("person@example.com", row["sanitized_payload_json"])
+        self.assertLess(len(row["sanitized_excerpt"]), len(row["sanitized_payload_json"]))
+
+    def test_temporal_metrics_handle_windows_projection_and_reset(self) -> None:
+        def payload(used: float, reset_at: int = 1788825600) -> dict:
+            return {
+                "rateLimitsByLimitId": {
+                    "codex_bengalfox": {
+                        "limitName": "Bengalfox",
+                        "secondary": {"usedPercent": used, "windowDurationMins": 10080, "resetsAt": reset_at},
+                    }
+                },
+                "rateLimits": {
+                    "limitId": "codex",
+                    "secondary": {"usedPercent": used, "windowDurationMins": 10080, "resetsAt": reset_at},
+                },
+                "rateLimitResetCredits": {"availableCount": 0},
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_cfg(tmp)
+            monitor.init_db(cfg)
+            base = dt.datetime(2026, 9, 3, 12, tzinfo=dt.timezone.utc)
+            with monitor.connect_db(cfg) as con:
+                run_id = monitor.start_run(con)
+                for hours_ago, used in ((25, 1), (24, 2), (6, 9), (1, 12), (0, 15)):
+                    monitor.insert_snapshot(
+                        con,
+                        run_id,
+                        "ok",
+                        self.reading_from_payload(payload(used)),
+                        acquired_at=base - dt.timedelta(hours=hours_ago),
+                    )
+                row = con.execute(
+                    """
+                    SELECT consumption_1h_percent, consumption_6h_percent, consumption_24h_percent,
+                           recent_consumption_per_hour, projected_used_at_reset_percent, metric_status
+                    FROM quota_temporal_metrics
+                    WHERE limit_id='codex_bengalfox' AND window_name='secondary'
+                    """
+                ).fetchone()
+                monitor.insert_snapshot(
+                    con,
+                    run_id,
+                    "ok",
+                    self.reading_from_payload(payload(4, 1789430400)),
+                    acquired_at=base + dt.timedelta(hours=1),
+                )
+                reset_row = con.execute(
+                    """
+                    SELECT consumption_1h_percent
+                    FROM quota_temporal_metrics
+                    WHERE limit_id='codex_bengalfox' AND window_name='secondary'
+                    """
+                ).fetchone()
+        self.assertEqual(row["consumption_1h_percent"], 3)
+        self.assertEqual(row["consumption_6h_percent"], 6)
+        self.assertEqual(row["consumption_24h_percent"], 13)
+        self.assertEqual(row["recent_consumption_per_hour"], 3)
+        self.assertEqual(row["metric_status"], "OK")
+        self.assertIsNotNone(row["projected_used_at_reset_percent"])
+        self.assertIsNone(reset_row["consumption_1h_percent"])
+
+    def test_failure_diagnostics_expose_current_streak_and_availability(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_cfg(tmp)
+            monitor.init_db(cfg)
+            now = monitor.utc_now()
+            with monitor.connect_db(cfg) as con:
+                run_id = monitor.start_run(con)
+                self.insert_reading(con, run_id, 10, 90, "2026-09-10T00:00:00Z", 0)
+                con.execute("UPDATE quota_snapshots SET acquired_at_utc=? WHERE snapshot_id=1", (monitor.utc_stamp(now - dt.timedelta(hours=3)),))
+                monitor.insert_snapshot(con, run_id, "error", None, error="temporary failure", acquired_at=now - dt.timedelta(hours=2))
+                monitor.insert_snapshot(con, run_id, "error", None, error="temporary failure", acquired_at=now - dt.timedelta(hours=1))
+                row = con.execute("SELECT * FROM failure_diagnostics").fetchone()
+        self.assertEqual(row["consecutive_failures"], 2)
+        self.assertIsNotNone(row["last_success_at_utc"])
+        self.assertIsNotNone(row["last_failure_streak_started_at_utc"])
+        self.assertEqual(row["availability_24h_percent"], 33.333)
+
+    def test_migration_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_cfg(tmp)
+            monitor.init_db(cfg)
+            monitor.init_db(cfg)
+            with monitor.connect_db(cfg) as con:
+                cols = [row["name"] for row in con.execute("PRAGMA table_info(quota_snapshots)").fetchall()]
+                child = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='rate_limit_snapshots'").fetchone()
+                fk = con.execute("PRAGMA foreign_key_check").fetchall()
+                integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
+        self.assertIn("sanitized_payload_json", cols)
+        self.assertIsNotNone(child)
+        self.assertEqual(fk, [])
+        self.assertEqual(integrity, "ok")
 
 
 if __name__ == "__main__":
