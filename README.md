@@ -69,3 +69,26 @@ file; `session_id` remains the native Codex thread/session id and may appear on
 multiple `archive_id` records when a session was resumed. Normalized files apply
 best-effort secret redaction; raw copies are exact and stored with restrictive
 permissions.
+
+## Per-session cost metrics
+
+`codex_task_costs.py` derives token and quota-cost metrics directly from native
+Codex rollout JSONL. The archive systemd service runs it automatically after
+each import.
+
+```bash
+python3 codex_task_costs.py
+```
+
+Outputs under `~/.local/share/codex-session-archive/index/`:
+
+- `task_costs.sqlite` — one `session_costs` row per Codex session.
+- `task_costs.csv` — convenient export of the same metrics.
+- SQLite view `expensive_sessions` — sessions ordered by total tokens.
+- SQLite view `model_reasoning_summary` — aggregate comparison by model and reasoning effort.
+
+Captured fields include model, reasoning effort, duration, turns, tool calls,
+reasoning items, PROMPT_IDs, input/cached/uncached/output/reasoning/total tokens,
+cache ratio, first/last weekly quota percentage and the observed quota delta
+inside the session. Quota delta is an observed session-window signal, not an
+exclusive attribution when multiple Codex sessions overlap.
