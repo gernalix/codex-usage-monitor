@@ -299,6 +299,10 @@ class ResetCountParsingTests(unittest.TestCase):
 
     def test_rate_limits_by_limit_id_are_persisted_dynamically(self) -> None:
         payload = {
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": {"usedPercent": 5, "windowDurationMins": 300, "resetsAt": 1780000000},
+            },
             "rateLimitsByLimitId": {
                 "codex": {
                     "limitName": "Codex",
@@ -323,7 +327,7 @@ class ResetCountParsingTests(unittest.TestCase):
                 snapshot_id = monitor.insert_snapshot(con, run_id, "ok", self.reading_from_payload(payload))
                 rows = con.execute(
                     """
-                    SELECT limit_id, model_name, plan_type, limit_family, window_name, window_duration_minutes, used_percent, remaining_percent
+                    SELECT limit_id, model_name, plan_type, limit_family, window_name, window_duration_minutes, used_percent, remaining_percent, source_path
                     FROM rate_limit_snapshots
                     WHERE snapshot_id=?
                     ORDER BY limit_id, window_name
@@ -331,8 +335,8 @@ class ResetCountParsingTests(unittest.TestCase):
                     (snapshot_id,),
                 ).fetchall()
         self.assertEqual(len(rows), 3)
-        self.assertIn(("future_unknown", "gpt-future", None, "model", "primary", 60, 12.5, 87.5), [tuple(row) for row in rows])
-        self.assertIn(("codex", None, "pro", None, "secondary", 10080, 20.0, 80.0), [tuple(row) for row in rows])
+        self.assertIn(("future_unknown", "gpt-future", None, "model", "primary", 60, 12.5, 87.5, "rateLimitsByLimitId.future_unknown.primary"), [tuple(row) for row in rows])
+        self.assertIn(("codex", None, "pro", None, "secondary", 10080, 20.0, 80.0, "rateLimitsByLimitId.codex.secondary"), [tuple(row) for row in rows])
 
     def test_sanitized_payload_json_is_complete_valid_and_redacted(self) -> None:
         payload = {

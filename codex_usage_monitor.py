@@ -611,7 +611,16 @@ def rate_limit_snapshots_from_payload(payload: dict[str, Any]) -> list[RateLimit
             limit_id = optional_text(item.get("limitId")) or optional_text(raw_id) or "unknown"
             add(item, limit_id, "primary", item.get("primary"), f"rateLimitsByLimitId.{limit_id}.primary")
             add(item, limit_id, "secondary", item.get("secondary"), f"rateLimitsByLimitId.{limit_id}.secondary")
-    return rows
+    deduped: dict[tuple[str, str, int | None, str | None], RateLimitSnapshot] = {}
+    for row in rows:
+        key = (row.limit_id, row.window_name, row.window_duration_minutes, row.reset_at_utc)
+        previous = deduped.get(key)
+        if previous is None or (
+            not previous.source_path.startswith("rateLimitsByLimitId.")
+            and row.source_path.startswith("rateLimitsByLimitId.")
+        ):
+            deduped[key] = row
+    return list(deduped.values())
 
 
 def choose_weekly_window(payload: dict[str, Any]) -> tuple[float | None, float | None, str | None, list[str]]:
