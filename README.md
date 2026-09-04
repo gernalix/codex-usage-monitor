@@ -92,3 +92,24 @@ reasoning items, PROMPT_IDs, input/cached/uncached/output/reasoning/total tokens
 cache ratio, first/last weekly quota percentage and the observed quota delta
 inside the session. Quota delta is an observed session-window signal, not an
 exclusive attribution when multiple Codex sessions overlap.
+
+## Diagnostic usage bundle
+
+`codex_session_archive.py` can generate one ChatGPT-uploadable diagnostic ZIP
+for token and quota investigations:
+
+```bash
+python3 codex_session_archive.py diagnostic-bundle
+```
+
+Default output:
+
+`~/.local/share/codex-session-archive/exports/codex-usage-diagnostic-bundle-YYYYMMDDTHHMMSSZ.zip`
+
+The bundle contains `manifest.json`, a README, `task_costs.sqlite`,
+`task_costs.csv`, the archive index, redacted normalized session JSONL,
+per-session manifests, archive metadata, archive docs and any valid local
+quota/rate-limit monitor history. Raw rollout files, raw gzip archives, native
+Codex auth/state databases, shell snapshots, locks, temporary files and old
+backups are excluded. Missing optional sources are listed in `manifest.json`
+instead of failing the command.

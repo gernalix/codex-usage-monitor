@@ -5,6 +5,7 @@ import json
 import tempfile
 from pathlib import Path
 import unittest
+import zipfile
 
 import codex_session_archive as archive
 
@@ -159,6 +160,59 @@ class SessionArchiveTests(unittest.TestCase):
             self.assertEqual(len(rows), 2)
             self.assertEqual({row["session_id"] for row in rows}, {session_id})
             self.assertEqual(len({row["normalized_path"] for row in rows}), 2)
+
+    def test_diagnostic_bundle_includes_redacted_diagnostic_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "archive"
+            source = Path(tmp) / "sessions"
+            output = Path(tmp) / "bundle.zip"
+            session_id = "019fd1da-cc5d-7db1-b880-a14be6111c38"
+            src = source / "rollout-2026-08-05T12-00-00-019fd1da-cc5d-7db1-b880-a14be6111c38.jsonl"
+            rows = self.make_rows(session_id)
+            rows.append(
+                {
+                    "timestamp": "2026-08-05T10:00:05.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {
+                                "input_tokens": 100,
+                                "cached_input_tokens": 40,
+                                "output_tokens": 20,
+                                "reasoning_output_tokens": 10,
+                                "total_tokens": 120,
+                            }
+                        },
+                        "rate_limits": {"primary": {"used_percent": 12.5, "resets_at": 1800000000}},
+                    },
+                }
+            )
+            write_jsonl(src, rows)
+            archive.import_session(root, source, src)
+            args = argparse_like(root, source_root=source)
+            args.output = str(output)
+
+            self.assertEqual(archive.command_diagnostic_bundle(args), 0)
+
+            with zipfile.ZipFile(output) as zf:
+                names = set(zf.namelist())
+                self.assertIn("manifest.json", names)
+                self.assertIn("README.md", names)
+                self.assertIn("index/task_costs.sqlite", names)
+                self.assertIn("index/task_costs.csv", names)
+                self.assertIn("index/archive.sqlite", names)
+                self.assertFalse(any(name.startswith("raw/") for name in names))
+                csv_text = zf.read("index/task_costs.csv").decode("utf-8")
+                self.assertIn("uncached_input_tokens", csv_text)
+                normalized_name = next(name for name in names if name.startswith("normalized/sessions/") and name.endswith(".jsonl"))
+                normalized = zf.read(normalized_name).decode("utf-8")
+                self.assertIn("[TELEGRAM_TOKEN_REDACTED]", normalized)
+                fake_token = "123456:" + "abcdefghijklmnopqrstuvwxyz"
+                self.assertNotIn(fake_token, normalized)
+                manifest = json.loads(zf.read("manifest.json"))
+                self.assertEqual(manifest["schema"], "codex-usage-diagnostic-bundle.v1")
+                self.assertTrue(manifest["excluded"])
 
 
 def argparse_like(root: Path, **kwargs: Path) -> object:
