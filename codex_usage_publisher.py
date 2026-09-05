@@ -405,6 +405,18 @@ def chat_metrics(chat_id: int, cycles: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def dedupe_cycle_keys(cycles: list[dict[str, Any]]) -> None:
+    seen: dict[str, list[dict[str, Any]]] = {}
+    for cycle in cycles:
+        seen.setdefault(str(cycle["metrics"]["cycle_key"]), []).append(cycle)
+    for key, items in seen.items():
+        if len(items) < 2:
+            continue
+        for cycle in items:
+            suffix = digest_text(str(cycle["metrics"].get("source_path") or cycle["final_event_id"]))[:8]
+            cycle["metrics"]["cycle_key"] = f"{key}-{suffix}"
+
+
 def quota_index(quota_db: Path) -> list[dict[str, Any]]:
     if not quota_db.exists() or not archive.sqlite_has_table(quota_db, "quota_snapshots"):
         return []
@@ -509,6 +521,7 @@ def command_run(args: argparse.Namespace) -> int:
                 if parsed:
                     chat_id = int(parsed[0]["metrics"]["chat_id"])
                     chat_events[chat_id] = events
+            dedupe_cycle_keys(cycles)
             pending_cycles = []
             for cycle in cycles:
                 row = con.execute(
@@ -521,6 +534,7 @@ def command_run(args: argparse.Namespace) -> int:
             export_repo(repo, cycles, chat_events, quota_db)
             status = run(["git", "status", "--short"], repo).stdout
             if not status.strip():
+                current_commit = run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
                 retry_cycles = []
                 for cycle in cycles:
                     row = con.execute(
@@ -529,6 +543,22 @@ def command_run(args: argparse.Namespace) -> int:
                     ).fetchone()
                     if row and row["published_commit"] and not row["telegram_sent"]:
                         retry_cycles.append(cycle)
+                    elif row is None or row["published_commit"] is None:
+                        m = cycle["metrics"]
+                        con.execute(
+                            """
+                            INSERT INTO cycles (cycle_key,session_id,chat_id,prompt_id,turn_id,final_event_id,source_path,source_sha256,completed_at_utc,published_commit,telegram_sent,updated_at_utc)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,0,?)
+                            ON CONFLICT(cycle_key) DO UPDATE SET
+                                source_sha256=excluded.source_sha256,
+                                published_commit=excluded.published_commit,
+                                updated_at_utc=excluded.updated_at_utc
+                            """,
+                            (m["cycle_key"], m["native_session_id"], m["chat_id"], m.get("prompt_id"), m.get("turn_id"), cycle["final_event_id"], m["source_path"], cycle["source_sha256"], m.get("timestamp_end_utc"), current_commit, utc_stamp()),
+                        )
+                        retry_cycles.append(cycle)
+                if retry_cycles:
+                    con.commit()
                 if retry_cycles:
                     retry_keys = {c["metrics"]["cycle_key"] for c in retry_cycles}
                     send_batch_telegram(retry_cycles, args.dry_run_telegram)
