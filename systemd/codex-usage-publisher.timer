@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Codex final-response usage publisher
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=15s
+Persistent=true
+Unit=codex-usage-publisher.service
+
+[Install]
+WantedBy=timers.target

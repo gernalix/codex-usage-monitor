@@ -30,10 +30,10 @@ from zoneinfo import ZoneInfo
 
 VERSION = "2026.09.03"
 APP_NAME = "codex-usage-monitor"
-DEFAULT_DB = Path("/home/ubuntu/sync_root/db/codex_usage_monitor.db")
-DEFAULT_STATE_DIR = Path("/home/ubuntu/.local/state/codex-usage-monitor")
+DEFAULT_DB = Path.home() / ".local/share/codex-usage-monitor/codex_usage_monitor.db"
+DEFAULT_STATE_DIR = Path.home() / ".local/state/codex-usage-monitor"
 DEFAULT_TELEGRAM_HELPER = Path("/home/ubuntu/telegram_notify.py")
-DEFAULT_CODEX_BIN = "/usr/bin/codex"
+DEFAULT_CODEX_BIN = "codex"
 DEFAULT_APP_SERVER_PORT = 38655
 SOURCE_METHOD = "codex-app-server account/rateLimits/read"
 DISPLAY_TZ = ZoneInfo("Europe/Copenhagen")
@@ -1392,6 +1392,21 @@ def load_telegram_helper(path: Path) -> ModuleType:
 
 
 def send_telegram(cfg: Config, title: str, message: str) -> str:
+    if not cfg.telegram_helper.exists():
+        env = os.environ.copy()
+        env.setdefault("TELEGRAM_NOTIFY_CONFIG", str(Path.home() / ".config/codex/secrets/telegram.env"))
+        result = subprocess.run(
+            [sys.executable, "-m", "telegram_notify", title, message],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            check=False,
+            timeout=45,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"telegram_notify CLI failed: {sanitize(result.stderr or result.stdout, 700)}")
+        return "sent via python3 -m telegram_notify"
     module = load_telegram_helper(cfg.telegram_helper)
     try:
         if hasattr(module, "send_message"):
