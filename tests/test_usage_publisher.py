@@ -14,11 +14,11 @@ def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
 
-def session_rows(session_id: str, prompt_id: str = "123456", second_prompt: str | None = None) -> list[dict[str, object]]:
+def session_rows(session_id: str, prompt_id: str = "123456", second_prompt: str | None = None, prompt_label: str = "PROMPT_ID:") -> list[dict[str, object]]:
     rows: list[dict[str, object]] = [
         {"timestamp": "2026-09-05T10:00:00Z", "type": "session_meta", "payload": {"session_id": session_id, "cwd": "/tmp"}},
         {"timestamp": "2026-09-05T10:00:01Z", "type": "turn_context", "payload": {"turn_id": "turn-1", "model": "gpt-test", "collaboration_mode": {"settings": {"reasoning_effort": "low"}}}},
-        {"timestamp": "2026-09-05T10:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"text": f"PROMPT_ID: {prompt_id} do it"}]}},
+        {"timestamp": "2026-09-05T10:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"text": f"{prompt_label} {prompt_id} do it"}]}},
         {"timestamp": "2026-09-05T10:00:03Z", "type": "response_item", "payload": {"type": "function_call", "name": "exec_command"}},
         {"timestamp": "2026-09-05T10:00:04Z", "type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 100, "cached_input_tokens": 25, "output_tokens": 40, "reasoning_output_tokens": 5, "total_tokens": 140}}, "rate_limits": {"primary": {"used_percent": 35, "resets_at": 1788765593}}}},
         {"timestamp": "2026-09-05T10:00:05Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "phase": "final_answer", "content": [{"text": "PASS\nok"}], "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"}}},
@@ -38,6 +38,14 @@ def session_rows(session_id: str, prompt_id: str = "123456", second_prompt: str 
 
 
 class UsagePublisherTests(unittest.TestCase):
+    def test_prompt_id_parser_accepts_markdown_escaped_label(self) -> None:
+        self.assertEqual(publisher.prompt_id_from_text("PROMPT_ID=123456"), "123456")
+        self.assertEqual(publisher.prompt_id_from_text("PROMPT\\_ID=123456"), "123456")
+        self.assertEqual(publisher.prompt_id_from_text("PROMPT_ID: 123456"), "123456")
+        self.assertEqual(publisher.prompt_id_from_text("PROMPT\\_ID: 123456"), "123456")
+        self.assertIsNone(publisher.prompt_id_from_text("no prompt here"))
+        self.assertIsNone(publisher.prompt_id_from_text("XPROMPT_ID=123456"))
+
     def test_prompt_id_chat_id_multiple_finals_and_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -74,6 +82,34 @@ class UsagePublisherTests(unittest.TestCase):
             self.assertEqual(first, second)
             text = (repo / "prompts/123456/transcript.jsonl").read_text(encoding="utf-8")
             self.assertIn("[TELEGRAM_TOKEN_REDACTED]", text)
+
+    def test_unassigned_cycle_recovers_prompt_without_renumbering_or_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            session = root / "s.jsonl"
+            write_jsonl(session, session_rows("019fd1da-cc5d-7db1-b880-a14be6111c38", "583216", prompt_label="PROMPT\\_ID="))
+            with publisher.connect_state(root / "state") as con:
+                cycles, events = publisher.parse_session(session, con)
+            metrics = cycles[0]["metrics"]
+            stale = repo / "prompts/unassigned" / metrics["cycle_key"]
+            stale.mkdir(parents=True)
+            (stale / "metrics.json").write_text('{"prompt_id":null}\n', encoding="utf-8")
+
+            publisher.export_repo(repo, cycles, {metrics["chat_id"]: events}, root / "missing.sqlite")
+            publisher.export_repo(repo, cycles, {metrics["chat_id"]: events}, root / "missing.sqlite")
+
+            self.assertEqual(metrics["prompt_id"], "583216")
+            self.assertEqual(metrics["chat_id"], 1)
+            self.assertEqual(metrics["cycle_key"], "834af07bf1e8f14fdaacc244")
+            self.assertTrue((repo / "prompts/583216/metrics.json").is_file())
+            self.assertFalse(stale.exists())
+            prompts = (repo / "index/prompts.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(prompts), 1)
+            self.assertIn('"prompt_id": "583216"', prompts[0])
+            chats = (repo / "index/chats.jsonl").read_text(encoding="utf-8")
+            self.assertIn('"chat_id": 1', chats)
 
     def test_push_failure_does_not_send_telegram(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

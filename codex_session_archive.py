@@ -229,6 +229,12 @@ def redact_obj(value: Any, key_hint: str = "") -> Any:
     return value
 
 
+def prompt_id_from_text(text: str) -> str | None:
+    normalized = (text or "").replace(r"\_", "_")
+    match = PROMPT_RE.search(normalized)
+    return match.group(1) if match else None
+
+
 def extract_text(payload: dict[str, Any]) -> str:
     if "message" in payload and isinstance(payload["message"], str):
         return payload["message"]
@@ -410,8 +416,9 @@ def normalize_session(path: Path, source_path: Path | None = None) -> tuple[str,
             if payload_type == "task_complete":
                 saw_complete = True
             text = extract_text(payload)
-            for match in PROMPT_RE.finditer(text):
-                prompt_ids.add(match.group(1))
+            prompt_id = prompt_id_from_text(text)
+            if prompt_id:
+                prompt_ids.add(prompt_id)
             subtype = payload_type or str(payload.get("name") or "")
             role = payload.get("role")
             type_counts[top_type] = type_counts.get(top_type, 0) + 1

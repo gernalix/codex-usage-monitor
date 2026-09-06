@@ -197,8 +197,7 @@ def quota_from_event(payload: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def prompt_id_from_text(text: str) -> str | None:
-    match = archive.PROMPT_RE.search(text or "")
-    return match.group(1) if match else None
+    return archive.prompt_id_from_text(text)
 
 
 def status_from_final(text: str) -> str:
@@ -443,6 +442,10 @@ def export_repo(repo: Path, cycles: list[dict[str, Any]], chat_events_by_id: dic
         rel = prompt_dir(metrics)
         write_json(repo / rel / "metrics.json", metrics)
         write_jsonl(repo / rel / "transcript.jsonl", cycle["events"])
+        if metrics.get("prompt_id"):
+            stale = repo / "prompts/unassigned" / str(metrics["cycle_key"])
+            if stale.exists():
+                shutil.rmtree(stale)
         prompt_rows.append(
             {
                 "prompt_id": metrics.get("prompt_id"),
@@ -525,10 +528,15 @@ def command_run(args: argparse.Namespace) -> int:
             pending_cycles = []
             for cycle in cycles:
                 row = con.execute(
-                    "SELECT source_sha256,published_commit FROM cycles WHERE cycle_key=?",
+                    "SELECT source_sha256,published_commit,prompt_id FROM cycles WHERE cycle_key=?",
                     (cycle["metrics"]["cycle_key"],),
                 ).fetchone()
-                if row is None or row["published_commit"] is None or row["source_sha256"] != cycle["source_sha256"]:
+                if (
+                    row is None
+                    or row["published_commit"] is None
+                    or row["source_sha256"] != cycle["source_sha256"]
+                    or row["prompt_id"] != cycle["metrics"].get("prompt_id")
+                ):
                     pending_cycles.append(cycle)
             ensure_repo(repo, args.remote)
             export_repo(repo, cycles, chat_events, quota_db)
@@ -550,6 +558,7 @@ def command_run(args: argparse.Namespace) -> int:
                             INSERT INTO cycles (cycle_key,session_id,chat_id,prompt_id,turn_id,final_event_id,source_path,source_sha256,completed_at_utc,published_commit,telegram_sent,updated_at_utc)
                             VALUES (?,?,?,?,?,?,?,?,?,?,0,?)
                             ON CONFLICT(cycle_key) DO UPDATE SET
+                                prompt_id=excluded.prompt_id,
                                 source_sha256=excluded.source_sha256,
                                 published_commit=excluded.published_commit,
                                 updated_at_utc=excluded.updated_at_utc
@@ -591,6 +600,7 @@ def command_run(args: argparse.Namespace) -> int:
                     INSERT INTO cycles (cycle_key,session_id,chat_id,prompt_id,turn_id,final_event_id,source_path,source_sha256,completed_at_utc,published_commit,telegram_sent,updated_at_utc)
                     VALUES (?,?,?,?,?,?,?,?,?,?,0,?)
                     ON CONFLICT(cycle_key) DO UPDATE SET
+                        prompt_id=excluded.prompt_id,
                         source_sha256=excluded.source_sha256,
                         published_commit=excluded.published_commit,
                         updated_at_utc=excluded.updated_at_utc
