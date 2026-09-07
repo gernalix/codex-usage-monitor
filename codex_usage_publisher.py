@@ -19,8 +19,10 @@ _legacy_parse_session = legacy.parse_session
 _legacy_export_repo = legacy.export_repo
 _legacy_send_batch_telegram = legacy.send_batch_telegram
 _legacy_command_run = legacy.command_run
+_legacy_status_from_final = legacy.status_from_final
 _should_export = False
 _notify_cycle_objects: set[int] = set()
+_guard_candidate_cycles: dict[str, dict[str, Any]] = {}
 
 
 def prompt_id_from_text(text: str) -> str | None:
@@ -30,6 +32,14 @@ def prompt_id_from_text(text: str) -> str | None:
     normalized = (text or "").replace(r"\_", "_")
     match = re.search(r"\bPROMPT_ID\s*[:=]\s*[`*_~]*([A-Za-z0-9_.-]+)\b", normalized)
     return match.group(1) if match else None
+
+
+def status_from_final(text: str) -> str:
+    normalized = (text or "").replace(r"\_", "_")
+    match = re.search(r"\bRESULT\s*[:=]\s*[`*_~]*\s*(PASS|BLOCKED|FAIL)\b", normalized, re.I)
+    if match:
+        return match.group(1).upper()
+    return _legacy_status_from_final(text)
 
 
 def connect_state(state_dir: Path) -> sqlite3.Connection:
@@ -55,6 +65,23 @@ def connect_state(state_dir: Path) -> sqlite3.Connection:
             checked_at_utc TEXT NOT NULL,
             FOREIGN KEY(cycle_key) REFERENCES cycles(cycle_key) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS git_completion_guard_repos (
+            cycle_key TEXT NOT NULL,
+            repo_path TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            turn_id TEXT,
+            status TEXT NOT NULL,
+            branch TEXT,
+            upstream TEXT,
+            ahead INTEGER,
+            behind INTEGER,
+            dirty_count INTEGER,
+            fetched INTEGER NOT NULL DEFAULT 0,
+            detail TEXT,
+            checked_at_utc TEXT NOT NULL,
+            PRIMARY KEY(cycle_key, repo_path),
+            FOREIGN KEY(cycle_key) REFERENCES cycles(cycle_key) ON DELETE CASCADE
+        );
         """
     )
     con.commit()
@@ -70,6 +97,8 @@ def _repo_root(path_text: str | None) -> Path | None:
         return None
     path = Path(path_text).expanduser()
     cwd = path if path.is_dir() else path.parent
+    if not cwd.exists():
+        return None
     result = _run_git(["rev-parse", "--show-toplevel"], cwd)
     if result.returncode != 0:
         return None
@@ -120,52 +149,118 @@ def classify_git_repo(repo: Path, *, fetch: bool = True) -> dict[str, Any]:
     }
 
 
-def record_git_completion_guard(con: sqlite3.Connection, cycle: dict[str, Any]) -> dict[str, Any]:
+def _repo_roots(path_texts: list[str]) -> list[Path]:
+    repos: dict[str, Path] = {}
+    for path_text in path_texts:
+        repo = _repo_root(path_text)
+        if repo is not None:
+            repos[str(repo)] = repo
+    return [repos[key] for key in sorted(repos)]
+
+
+def record_git_completion_guard(con: sqlite3.Connection, cycle: dict[str, Any]) -> list[dict[str, Any]]:
     metrics = cycle["metrics"]
     cycle_key = str(metrics["cycle_key"])
-    existing = con.execute("SELECT status FROM git_completion_guard WHERE cycle_key=?", (cycle_key,)).fetchone()
-    if existing:
-        return {"cycle_key": cycle_key, "status": existing["status"], "idempotent": True}
-    repo = _repo_root(metrics.get("repo_project"))
-    if repo is None:
-        guard = {
-            "repo_path": str(metrics.get("repo_project") or "unknown"),
-            "status": "unknown",
-            "branch": None,
-            "upstream": None,
-            "ahead": None,
-            "behind": None,
-            "dirty_count": None,
-            "fetched": 0,
-            "detail": "repo_unresolved",
-        }
-    else:
-        guard = classify_git_repo(repo)
-    con.execute(
-        """
-        INSERT INTO git_completion_guard (
-            cycle_key, session_id, turn_id, repo_path, status, branch, upstream,
-            ahead, behind, dirty_count, fetched, detail, checked_at_utc
+    existing_rows = con.execute("SELECT repo_path,status FROM git_completion_guard_repos WHERE cycle_key=?", (cycle_key,)).fetchall()
+    if existing_rows:
+        return [{"cycle_key": cycle_key, "repo_path": row["repo_path"], "status": row["status"], "idempotent": True} for row in existing_rows]
+    repos = _repo_roots(list(metrics.get("repo_projects") or []))
+    guard_rows: list[dict[str, Any]] = []
+    if not repos:
+        guard_rows.append(
+            {
+                "repo_path": str(metrics.get("repo_project") or "unknown"),
+                "status": "unknown",
+                "branch": None,
+                "upstream": None,
+                "ahead": None,
+                "behind": None,
+                "dirty_count": None,
+                "fetched": 0,
+                "detail": "repo_unresolved",
+            }
         )
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """,
-        (
-            cycle_key,
-            metrics["native_session_id"],
-            metrics.get("turn_id"),
-            guard["repo_path"],
-            guard["status"],
-            guard["branch"],
-            guard["upstream"],
-            guard["ahead"],
-            guard["behind"],
-            guard["dirty_count"],
-            guard["fetched"],
-            guard["detail"],
-            legacy.utc_stamp(),
-        ),
-    )
-    return {"cycle_key": cycle_key, **guard, "idempotent": False}
+    else:
+        guard_rows.extend(classify_git_repo(repo) for repo in repos)
+    for guard in guard_rows:
+        con.execute(
+            """
+            INSERT INTO git_completion_guard_repos (
+                cycle_key, repo_path, session_id, turn_id, status, branch, upstream,
+                ahead, behind, dirty_count, fetched, detail, checked_at_utc
+            )
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                cycle_key,
+                guard["repo_path"],
+                metrics["native_session_id"],
+                metrics.get("turn_id"),
+                guard["status"],
+                guard["branch"],
+                guard["upstream"],
+                guard["ahead"],
+                guard["behind"],
+                guard["dirty_count"],
+                guard["fetched"],
+                guard["detail"],
+                legacy.utc_stamp(),
+            ),
+        )
+    if guard_rows:
+        summary = guard_rows[0]
+        con.execute(
+            """
+            INSERT OR IGNORE INTO git_completion_guard (
+                cycle_key, session_id, turn_id, repo_path, status, branch, upstream,
+                ahead, behind, dirty_count, fetched, detail, checked_at_utc
+            )
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                cycle_key,
+                metrics["native_session_id"],
+                metrics.get("turn_id"),
+                f"{len(guard_rows)} repos",
+                "multi_repo" if len(guard_rows) > 1 else summary["status"],
+                summary["branch"],
+                summary["upstream"],
+                summary["ahead"],
+                summary["behind"],
+                summary["dirty_count"],
+                max(int(row["fetched"]) for row in guard_rows),
+                None,
+                legacy.utc_stamp(),
+            ),
+        )
+    return [{"cycle_key": cycle_key, **guard, "idempotent": False} for guard in guard_rows]
+
+
+def _json_obj(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _explicit_paths_from_payload(payload: dict[str, Any]) -> list[str]:
+    args = _json_obj(payload.get("arguments")) or _json_obj(payload.get("input"))
+    paths: list[str] = []
+    for key in ("workdir", "cwd", "path", "file"):
+        value = args.get(key) or payload.get(key)
+        if isinstance(value, str) and value.startswith("/"):
+            paths.append(value)
+    target = args.get("target")
+    if isinstance(target, dict):
+        value = target.get("path")
+        if isinstance(value, str) and value.startswith("/"):
+            paths.append(value)
+    return paths
 
 
 def _fingerprint(cycle: dict[str, Any]) -> str:
@@ -178,6 +273,8 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
     cycles, events = _legacy_parse_session(path, con)
     session_cwd: str | None = None
     cwd_by_turn: dict[str, str] = {}
+    repo_paths_by_turn: dict[str, list[str]] = {}
+    active_turn_id: str | None = None
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         if not line.strip():
             continue
@@ -190,8 +287,15 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
             session_cwd = payload["cwd"]
         if obj.get("type") == "turn_context" and isinstance(payload.get("cwd"), str):
             turn_id = str(payload.get("turn_id") or "")
+            active_turn_id = turn_id or active_turn_id
             if turn_id:
                 cwd_by_turn[turn_id] = payload["cwd"]
+        elif obj.get("type") == "turn_context":
+            active_turn_id = str(payload.get("turn_id") or active_turn_id or "")
+        if payload.get("type") in {"function_call", "custom_tool_call"}:
+            turn_id = str(((payload.get("internal_chat_message_metadata_passthrough") or {}).get("turn_id")) or active_turn_id or "")
+            if turn_id:
+                repo_paths_by_turn.setdefault(turn_id, []).extend(_explicit_paths_from_payload(payload))
     last_prompt_id: str | None = None
     migrated = False
 
@@ -199,6 +303,14 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
         metrics = cycle["metrics"]
         if not metrics.get("repo_project"):
             metrics["repo_project"] = cwd_by_turn.get(str(metrics.get("turn_id") or "")) or session_cwd
+        candidate_paths = list(repo_paths_by_turn.get(str(metrics.get("turn_id") or ""), []))
+        fallback = metrics.get("repo_project")
+        if isinstance(fallback, str):
+            candidate_paths.append(fallback)
+        metrics["repo_projects"] = [str(repo) for repo in _repo_roots(candidate_paths)]
+        if metrics["repo_projects"]:
+            metrics["repo_project"] = metrics["repo_projects"][0]
+        metrics["status"] = status_from_final(str(metrics.get("final_response_redacted") or ""))
         prompt_id = metrics.get("prompt_id")
         prompt_text = str(metrics.get("prompt_text_redacted") or "")
         final_text = str(metrics.get("final_response_redacted") or "")
@@ -242,6 +354,8 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
         prompt_changed = row is not None and row["prompt_id"] != metrics.get("prompt_id")
         if is_new or content_changed or prompt_changed:
             _should_export = True
+        if is_new or prompt_changed:
+            _guard_candidate_cycles[key] = cycle
         if is_new or (row is not None and row["published_commit"] and not row["telegram_sent"]):
             _notify_cycle_objects.add(id(cycle))
 
@@ -268,6 +382,7 @@ def _install_runtime() -> None:
     legacy.VERSION = VERSION
     legacy.connect_state = connect_state
     legacy.prompt_id_from_text = prompt_id_from_text
+    legacy.status_from_final = status_from_final
     legacy.parse_session = parse_session
     legacy.export_repo = export_repo
     legacy.send_batch_telegram = globals()["send_batch_telegram"]
@@ -280,25 +395,23 @@ def _install_runtime() -> None:
 
 
 def command_run(args) -> int:
-    global _should_export, _notify_cycle_objects
+    global _should_export, _notify_cycle_objects, _guard_candidate_cycles
     _should_export = False
     _notify_cycle_objects = set()
+    _guard_candidate_cycles = {}
     _install_runtime()
     result = int(_legacy_command_run(args))
-    if result == 0:
+    if result == 0 and _guard_candidate_cycles:
         state_dir = Path(args.state_dir).expanduser()
-        source_root = Path(args.source_root).expanduser()
         with connect_state(state_dir) as con:
             guard_rows = []
-            for path in sorted(source_root.glob("**/*.jsonl")):
-                cycles, _events = parse_session(path, con)
-                for cycle in cycles:
-                    row = con.execute(
-                        "SELECT published_commit FROM cycles WHERE cycle_key=?",
-                        (cycle["metrics"]["cycle_key"],),
-                    ).fetchone()
-                    if row and row["published_commit"]:
-                        guard_rows.append(record_git_completion_guard(con, cycle))
+            for cycle in _guard_candidate_cycles.values():
+                row = con.execute(
+                    "SELECT published_commit FROM cycles WHERE cycle_key=?",
+                    (cycle["metrics"]["cycle_key"],),
+                ).fetchone()
+                if row and row["published_commit"]:
+                    guard_rows.extend(record_git_completion_guard(con, cycle))
             con.commit()
         anomalies = [row for row in guard_rows if row.get("status") not in {"clean_synced"} and not row.get("idempotent")]
         if anomalies:

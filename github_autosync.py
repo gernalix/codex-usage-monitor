@@ -129,6 +129,27 @@ def summarize_ghorg_output(output: str) -> dict[str, int]:
     }
 
 
+def normalize_remote(url: str) -> str:
+    text = url.strip()
+    if text.startswith("git@github.com:"):
+        text = "https://github.com/" + text.removeprefix("git@github.com:")
+    return text.removesuffix(".git").rstrip("/").lower()
+
+
+def git_repo_matches_remote(worktree: Path, expected_remote: str) -> bool:
+    if not (worktree / ".git").exists():
+        return False
+    result = run(["git", "config", "--get", "remote.origin.url"], worktree, timeout=30)
+    if result.returncode != 0:
+        return False
+    return normalize_remote(result.stdout) == normalize_remote(expected_remote)
+
+
+def require_ok(result: subprocess.CompletedProcess[str], label: str) -> None:
+    if result.returncode != 0:
+        raise AutosyncError(label)
+
+
 def register_in_megavault(megavault: Path, projects_dir: Path, repos: list[dict[str, str]], *, dry_run: bool) -> dict[str, int | str]:
     if dry_run:
         return {"already_registered": 0, "newly_registered": 0, "deferred": 0, "validation": "dry_run"}
@@ -137,8 +158,12 @@ def register_in_megavault(megavault: Path, projects_dir: Path, repos: list[dict[
     if run(["git", "rev-list", "--left-right", "--count", "HEAD...@{u}"], megavault).stdout.strip() != "0\t0":
         return {"already_registered": 0, "newly_registered": 0, "deferred": len(repos), "validation": "deferred_not_synced"}
     before = run(["git", "rev-parse", "HEAD"], megavault).stdout.strip()
-    already = created = 0
+    already = created = deferred = 0
     for repo in repos:
+        worktree = projects_dir / repo["name"]
+        if not git_repo_matches_remote(worktree, repo["url"]):
+            deferred += 1
+            continue
         result = run(
             [
                 "python3",
@@ -153,7 +178,7 @@ def register_in_megavault(megavault: Path, projects_dir: Path, repos: list[dict[
                 "--default-branch",
                 repo["default_branch"],
                 "--worktree",
-                str(projects_dir / repo["name"]),
+                str(worktree),
             ],
             cwd=megavault,
             timeout=60,
@@ -168,13 +193,15 @@ def register_in_megavault(megavault: Path, projects_dir: Path, repos: list[dict[
     if validation.returncode != 0:
         raise AutosyncError("megavault_validate_failed")
     if created:
-        run(["git", "add", "megavault.sqlite"], megavault, timeout=30)
-        run(["git", "commit", "-m", "Register autosynced GitHub repositories"], megavault, timeout=120)
+        require_ok(run(["git", "add", "megavault.sqlite"], megavault, timeout=30), "megavault_git_add_failed")
+        require_ok(run(["git", "commit", "-m", "Register autosynced GitHub repositories"], megavault, timeout=120), "megavault_metadata_commit_failed")
         push = run(["git", "push", "origin", "master"], megavault, timeout=240)
-        if push.returncode != 0:
-            raise AutosyncError("megavault_metadata_push_failed")
+        require_ok(push, "megavault_metadata_push_failed")
+        verify = run(["git", "rev-list", "--left-right", "--count", "HEAD...@{u}"], megavault, timeout=30)
+        if verify.stdout.strip() != "0\t0":
+            raise AutosyncError("megavault_metadata_verify_failed")
     after = run(["git", "rev-parse", "HEAD"], megavault).stdout.strip()
-    return {"already_registered": already, "newly_registered": created, "deferred": 0, "validation": "PASS", "commit_changed": str(before != after)}
+    return {"already_registered": already, "newly_registered": created, "deferred": deferred, "validation": "PASS", "commit_changed": str(before != after)}
 
 
 def command_run(args: argparse.Namespace) -> int:
@@ -185,7 +212,10 @@ def command_run(args: argparse.Namespace) -> int:
         repos = [{**repo, "owner": args.owner} for repo in github_repos(args.owner)]
         ghorg_result = run_ghorg(args.owner, projects_dir, dry_run=args.dry_run)
         summary = summarize_ghorg_output((ghorg_result.stdout or "") + "\n" + (ghorg_result.stderr or ""))
-        registration = register_in_megavault(megavault, projects_dir, repos, dry_run=args.dry_run)
+        if ghorg_result.returncode == 0:
+            registration = register_in_megavault(megavault, projects_dir, repos, dry_run=args.dry_run)
+        else:
+            registration = {"already_registered": 0, "newly_registered": 0, "deferred": len(repos), "validation": "skipped_ghorg_failed"}
     payload = {
         "status": "ok" if ghorg_result.returncode == 0 else "ghorg_failed",
         "owner": args.owner,

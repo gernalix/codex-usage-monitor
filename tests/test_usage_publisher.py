@@ -37,8 +37,23 @@ def session_rows(session_id: str, prompt_id: str = "123456", second_prompt: str 
     return rows
 
 
+def published_cycle_sql(cycle: dict[str, object]) -> tuple[object, ...]:
+    metrics = cycle["metrics"]
+    return (
+        metrics["cycle_key"],
+        metrics["native_session_id"],
+        metrics["chat_id"],
+        cycle["final_event_id"],
+        metrics["source_path"],
+        cycle["source_sha256"],
+        "abc123",
+        publisher.legacy.utc_stamp(),
+    )
+
+
 class UsagePublisherTests(unittest.TestCase):
     def make_git_pair(self, root: Path) -> tuple[Path, Path]:
+        root.mkdir(parents=True, exist_ok=True)
         bare = root / "origin.git"
         repo = root / "repo"
         publisher.run(["git", "init", "--bare", str(bare)])
@@ -152,6 +167,37 @@ class UsagePublisherTests(unittest.TestCase):
                 self.assertEqual(publisher.main(argv), 0)
             self.assertEqual(send.call_count, 1)
 
+    def test_result_status_mapping_accepts_explicit_terminal_result(self) -> None:
+        self.assertEqual("PASS", publisher.status_from_final("PROMPT_ID=1\nRESULT=PASS"))
+        self.assertEqual("PASS", publisher.status_from_final("RESULT: `PASS`"))
+        self.assertEqual("BLOCKED", publisher.status_from_final("RESULT=BLOCKED"))
+        self.assertEqual("FAIL", publisher.status_from_final("RESULT: FAIL"))
+        self.assertEqual("UNKNOWN", publisher.status_from_final("No explicit result here."))
+
+    def test_missing_explicit_path_does_not_crash_repo_resolution(self) -> None:
+        self.assertIsNone(publisher._repo_root("/tmp/path-that-does-not-exist-for-codex-guard/file.txt"))
+
+    def test_628431_equivalent_result_pass_is_idempotent_without_extra_telegram(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "sessions"
+            repo = root / "repo"
+            rows = session_rows("019fd1da-cc5d-7db1-b880-a14be6111c38", prompt_id="628431")
+            rows[-2]["payload"]["content"][0]["text"] = "PROMPT_ID=628431\nRESULT=PASS"
+            rows[-1]["payload"]["last_agent_message"] = "PROMPT_ID=628431\nRESULT=PASS"
+            write_jsonl(source / "s.jsonl", rows)
+            publisher.run(["git", "init", "-b", "main", str(repo)])
+            publisher.run(["git", "config", "user.email", "test@example.invalid"], repo)
+            publisher.run(["git", "config", "user.name", "Test"], repo)
+            argv = ["--source-root", str(source), "--state-dir", str(root / "state"), "--data-repo", str(repo), "run"]
+            with mock.patch.object(publisher, "assert_private_repo"), mock.patch.object(publisher, "ensure_repo"), mock.patch.object(publisher, "git_ok") as git_ok, mock.patch.object(publisher, "send_batch_telegram", return_value=True) as send:
+                git_ok.side_effect = lambda cmd, cwd, timeout=120: publisher.run(cmd, cwd)
+                self.assertEqual(publisher.main(argv), 0)
+                self.assertEqual(publisher.main(argv), 0)
+            metrics = json.loads((repo / "prompts/628431/metrics.json").read_text(encoding="utf-8"))
+            self.assertEqual("PASS", metrics["status"])
+            self.assertEqual(send.call_count, 1)
+
     def test_git_completion_guard_classifies_clean_dirty_ahead_diverged_and_no_upstream(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -216,11 +262,70 @@ class UsagePublisherTests(unittest.TestCase):
                 )
                 first = publisher.record_git_completion_guard(con, cycle)
                 second = publisher.record_git_completion_guard(con, cycle)
-                rows_count = con.execute("SELECT COUNT(*) FROM git_completion_guard").fetchone()[0]
-            self.assertEqual("clean_synced", first["status"])
-            self.assertFalse(first["idempotent"])
-            self.assertTrue(second["idempotent"])
+                rows_count = con.execute("SELECT COUNT(*) FROM git_completion_guard_repos").fetchone()[0]
+            self.assertEqual(["clean_synced"], [row["status"] for row in first])
+            self.assertFalse(first[0]["idempotent"])
+            self.assertTrue(second[0]["idempotent"])
             self.assertEqual(1, rows_count)
+
+    def test_git_completion_guard_records_three_tool_repos_with_cwd_outside_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repos = [self.make_git_pair(root / f"pair{i}")[0] for i in range(3)]
+            session = root / "sessions" / "s.jsonl"
+            rows = session_rows("019fd1da-cc5d-7db1-b880-a14be6111c38")
+            rows[0]["payload"]["cwd"] = str(root / "not-a-repo")
+            rows[1]["payload"]["cwd"] = str(root / "also-not-a-repo")
+            tool_rows = []
+            for idx, repo in enumerate(repos):
+                tool_rows.append(
+                    {
+                        "timestamp": f"2026-09-05T10:00:0{idx + 3}Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call",
+                            "name": "exec_command",
+                            "arguments": json.dumps({"cmd": "true", "workdir": str(repo)}),
+                        },
+                    }
+                )
+            rows = rows[:3] + tool_rows + rows[4:]
+            write_jsonl(session, rows)
+            with publisher.connect_state(root / "state") as con:
+                cycles, _events = publisher.parse_session(session, con)
+                cycle = cycles[0]
+                con.execute(
+                    """
+                    INSERT INTO cycles (cycle_key,session_id,chat_id,final_event_id,source_path,source_sha256,published_commit,updated_at_utc)
+                    VALUES (?,?,?,?,?,?,?,?)
+                    """,
+                    published_cycle_sql(cycle),
+                )
+                recorded = publisher.record_git_completion_guard(con, cycle)
+                again = publisher.record_git_completion_guard(con, cycle)
+                repo_rows = con.execute("SELECT repo_path,status FROM git_completion_guard_repos ORDER BY repo_path").fetchall()
+            self.assertEqual(3, len(recorded))
+            self.assertEqual(3, len(repo_rows))
+            self.assertEqual([str(repo) for repo in repos], [row["repo_path"] for row in repo_rows])
+            self.assertEqual(["clean_synced", "clean_synced", "clean_synced"], [row["status"] for row in repo_rows])
+            self.assertTrue(all(row["idempotent"] for row in again))
+
+    def test_noop_run_does_not_invoke_guard_again(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "sessions"
+            repo = root / "repo"
+            write_jsonl(source / "s.jsonl", session_rows("019fd1da-cc5d-7db1-b880-a14be6111c38"))
+            publisher.run(["git", "init", "-b", "main", str(repo)])
+            publisher.run(["git", "config", "user.email", "test@example.invalid"], repo)
+            publisher.run(["git", "config", "user.name", "Test"], repo)
+            argv = ["--source-root", str(source), "--state-dir", str(root / "state"), "--data-repo", str(repo), "run"]
+            with mock.patch.object(publisher, "assert_private_repo"), mock.patch.object(publisher, "ensure_repo"), mock.patch.object(publisher, "git_ok") as git_ok, mock.patch.object(publisher, "send_batch_telegram", return_value=True), mock.patch.object(publisher, "record_git_completion_guard", wraps=publisher.record_git_completion_guard) as guard:
+                git_ok.side_effect = lambda cmd, cwd, timeout=120: publisher.run(cmd, cwd)
+                self.assertEqual(publisher.main(argv), 0)
+                self.assertEqual(guard.call_count, 1)
+                self.assertEqual(publisher.main(argv), 0)
+                self.assertEqual(guard.call_count, 1)
 
 
 if __name__ == "__main__":
