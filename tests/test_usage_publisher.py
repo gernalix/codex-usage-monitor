@@ -38,6 +38,20 @@ def session_rows(session_id: str, prompt_id: str = "123456", second_prompt: str 
 
 
 class UsagePublisherTests(unittest.TestCase):
+    def make_git_pair(self, root: Path) -> tuple[Path, Path]:
+        bare = root / "origin.git"
+        repo = root / "repo"
+        publisher.run(["git", "init", "--bare", str(bare)])
+        publisher.run(["git", "clone", str(bare), str(repo)])
+        publisher.run(["git", "config", "user.email", "test@example.invalid"], repo)
+        publisher.run(["git", "config", "user.name", "Test"], repo)
+        (repo / "file.txt").write_text("base\n", encoding="utf-8")
+        publisher.run(["git", "add", "file.txt"], repo)
+        publisher.run(["git", "commit", "-m", "base"], repo)
+        publisher.run(["git", "branch", "-M", "main"], repo)
+        publisher.run(["git", "push", "-u", "origin", "main"], repo)
+        return repo, bare
+
     def test_prompt_id_parser_accepts_markdown_escaped_label(self) -> None:
         self.assertEqual(publisher.prompt_id_from_text("PROMPT_ID=123456"), "123456")
         self.assertEqual(publisher.prompt_id_from_text("PROMPT\\_ID=123456"), "123456")
@@ -137,6 +151,76 @@ class UsagePublisherTests(unittest.TestCase):
                 self.assertEqual(publisher.main(argv), 0)
                 self.assertEqual(publisher.main(argv), 0)
             self.assertEqual(send.call_count, 1)
+
+    def test_git_completion_guard_classifies_clean_dirty_ahead_diverged_and_no_upstream(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, bare = self.make_git_pair(root)
+            self.assertEqual("clean_synced", publisher.classify_git_repo(repo)["status"])
+
+            (repo / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+            self.assertEqual("dirty", publisher.classify_git_repo(repo)["status"])
+            (repo / "dirty.txt").unlink()
+
+            (repo / "file.txt").write_text("ahead\n", encoding="utf-8")
+            publisher.run(["git", "commit", "-am", "ahead"], repo)
+            self.assertEqual("ahead", publisher.classify_git_repo(repo)["status"])
+
+            other = root / "other"
+            publisher.run(["git", "clone", str(bare), str(other)])
+            publisher.run(["git", "config", "user.email", "test@example.invalid"], other)
+            publisher.run(["git", "config", "user.name", "Test"], other)
+            publisher.run(["git", "checkout", "main"], other)
+            (other / "remote.txt").write_text("remote\n", encoding="utf-8")
+            publisher.run(["git", "add", "remote.txt"], other)
+            publisher.run(["git", "commit", "-m", "remote"], other)
+            publisher.run(["git", "push", "origin", "main"], other)
+            self.assertEqual("diverged", publisher.classify_git_repo(repo)["status"])
+
+            local = root / "local"
+            publisher.run(["git", "init", "-b", "main", str(local)])
+            publisher.run(["git", "config", "user.email", "test@example.invalid"], local)
+            publisher.run(["git", "config", "user.name", "Test"], local)
+            (local / "file.txt").write_text("local\n", encoding="utf-8")
+            publisher.run(["git", "add", "file.txt"], local)
+            publisher.run(["git", "commit", "-m", "local"], local)
+            self.assertEqual("no_upstream", publisher.classify_git_repo(local)["status"])
+
+    def test_git_completion_guard_records_once_per_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _bare = self.make_git_pair(root)
+            session = root / "sessions" / "s.jsonl"
+            rows = session_rows("019fd1da-cc5d-7db1-b880-a14be6111c38")
+            rows[0]["payload"]["cwd"] = str(repo)
+            write_jsonl(session, rows)
+            with publisher.connect_state(root / "state") as con:
+                cycles, _events = publisher.parse_session(session, con)
+                cycle = cycles[0]
+                metrics = cycle["metrics"]
+                con.execute(
+                    """
+                    INSERT INTO cycles (cycle_key,session_id,chat_id,final_event_id,source_path,source_sha256,published_commit,updated_at_utc)
+                    VALUES (?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        metrics["cycle_key"],
+                        metrics["native_session_id"],
+                        metrics["chat_id"],
+                        cycle["final_event_id"],
+                        metrics["source_path"],
+                        cycle["source_sha256"],
+                        "abc123",
+                        publisher.legacy.utc_stamp(),
+                    ),
+                )
+                first = publisher.record_git_completion_guard(con, cycle)
+                second = publisher.record_git_completion_guard(con, cycle)
+                rows_count = con.execute("SELECT COUNT(*) FROM git_completion_guard").fetchone()[0]
+            self.assertEqual("clean_synced", first["status"])
+            self.assertFalse(first["idempotent"])
+            self.assertTrue(second["idempotent"])
+            self.assertEqual(1, rows_count)
 
 
 if __name__ == "__main__":
