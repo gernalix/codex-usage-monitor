@@ -200,6 +200,33 @@ def prompt_id_from_text(text: str) -> str | None:
     return archive.prompt_id_from_text(text)
 
 
+def json_obj(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def explicit_paths_from_payload(payload: dict[str, Any]) -> list[str]:
+    args = json_obj(payload.get("arguments")) or json_obj(payload.get("input"))
+    paths: list[str] = []
+    for key in ("workdir", "cwd", "path", "file"):
+        value = args.get(key) or payload.get(key)
+        if isinstance(value, str) and value.startswith("/"):
+            paths.append(value)
+    target = args.get("target")
+    if isinstance(target, dict):
+        value = target.get("path")
+        if isinstance(value, str) and value.startswith("/"):
+            paths.append(value)
+    return paths
+
+
 def status_from_final(text: str) -> str:
     first = next((line.strip().upper() for line in text.splitlines() if line.strip()), "")
     return first if first in {"PASS", "FAIL", "PARTIAL", "BLOCKED_REPO_PUBLIC"} else "UNKNOWN"
@@ -230,6 +257,7 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
     cycles: list[dict[str, Any]] = []
     chat_events: list[dict[str, Any]] = []
     final_by_turn: dict[str, str] = {}
+    session_cwd: str | None = None
     raw_lines = path.read_text(encoding="utf-8", errors="replace")
     sha = digest_text(raw_lines)
 
@@ -246,6 +274,8 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
         ts = parse_ts(obj.get("timestamp"))
         if top == "session_meta":
             session_id = str(payload.get("session_id") or payload.get("id") or session_id)
+            if isinstance(payload.get("cwd"), str):
+                session_cwd = payload["cwd"]
             chat_id = get_chat_id(con, session_id)
         if chat_id is None:
             chat_id = get_chat_id(con, session_id)
@@ -258,7 +288,8 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
                 "started_at_utc": utc_stamp(ts) if ts else None,
                 "model": payload.get("model") or settings.get("model"),
                 "reasoning_effort": settings.get("reasoning_effort") or payload.get("effort"),
-                "cwd": payload.get("cwd"),
+                "cwd": payload.get("cwd") or session_cwd,
+                "repo_paths": [],
                 "prompt_text": "",
                 "prompt_id": None,
                 "events": [],
@@ -284,6 +315,7 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
                 current["tool_calls"] += 1
                 name = str(payload.get("name") or ptype)
                 current["tool_calls_by_type"][name] = current["tool_calls_by_type"].get(name, 0) + 1
+                current["repo_paths"].extend(explicit_paths_from_payload(payload))
             if ptype == "message" and payload.get("role") == "user" and not current["prompt_text"]:
                 current["prompt_text"] = archive.redact_text(extract_output_text(payload))
                 current["prompt_id"] = prompt_id_from_text(current["prompt_text"])
@@ -343,6 +375,7 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
                 "final_response_redacted": final,
                 "status": status_from_final(final),
                 "repo_project": current.get("cwd"),
+                "repo_paths": current.get("repo_paths") or [],
             }
             cycles.append({"metrics": metrics, "events": current["events"], "final_event_id": f"{path}:{line_no}", "source_sha256": sha})
             current = None

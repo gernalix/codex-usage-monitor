@@ -232,6 +232,48 @@ class UsagePublisherTests(unittest.TestCase):
             publisher.run(["git", "commit", "-m", "local"], local)
             self.assertEqual("no_upstream", publisher.classify_git_repo(local)["status"])
 
+    def test_git_completion_guard_fetch_failure_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _bare = self.make_git_pair(Path(tmp))
+            calls = []
+
+            def fake_run(args, cwd, timeout=30):
+                calls.append(args)
+                if args[:3] == ["rev-parse", "--abbrev-ref", "HEAD"]:
+                    return publisher.subprocess.CompletedProcess(args, 0, "main\n", "")
+                if args[:3] == ["rev-parse", "--abbrev-ref", "--symbolic-full-name"]:
+                    return publisher.subprocess.CompletedProcess(args, 0, "origin/main\n", "")
+                if args[:2] == ["fetch", "origin"]:
+                    return publisher.subprocess.CompletedProcess(args, 1, "", "network down")
+                return publisher.subprocess.CompletedProcess(args, 0, "", "")
+
+            with mock.patch.object(publisher, "_run_git", side_effect=fake_run):
+                result = publisher.classify_git_repo(repo)
+            self.assertEqual("unknown", result["status"])
+            self.assertEqual("fetch_failed", result["detail"])
+
+    def test_git_completion_guard_rev_list_failure_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _bare = self.make_git_pair(Path(tmp))
+
+            def fake_run(args, cwd, timeout=30):
+                if args[:3] == ["rev-parse", "--abbrev-ref", "HEAD"]:
+                    return publisher.subprocess.CompletedProcess(args, 0, "main\n", "")
+                if args[:3] == ["rev-parse", "--abbrev-ref", "--symbolic-full-name"]:
+                    return publisher.subprocess.CompletedProcess(args, 0, "origin/main\n", "")
+                if args[:2] == ["fetch", "origin"]:
+                    return publisher.subprocess.CompletedProcess(args, 0, "", "")
+                if args[:2] == ["status", "--porcelain"]:
+                    return publisher.subprocess.CompletedProcess(args, 0, "", "")
+                if args[:3] == ["rev-list", "--left-right", "--count"]:
+                    return publisher.subprocess.CompletedProcess(args, 0, "not counts\n", "")
+                return publisher.subprocess.CompletedProcess(args, 0, "", "")
+
+            with mock.patch.object(publisher, "_run_git", side_effect=fake_run):
+                result = publisher.classify_git_repo(repo)
+            self.assertEqual("unknown", result["status"])
+            self.assertEqual("rev_list_malformed", result["detail"])
+
     def test_git_completion_guard_records_once_per_cycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -309,6 +351,123 @@ class UsagePublisherTests(unittest.TestCase):
             self.assertEqual([str(repo) for repo in repos], [row["repo_path"] for row in repo_rows])
             self.assertEqual(["clean_synced", "clean_synced", "clean_synced"], [row["status"] for row in repo_rows])
             self.assertTrue(all(row["idempotent"] for row in again))
+
+    def test_explicit_tool_repos_exclude_session_cwd_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_a = self.make_git_pair(root / "pair-a")[0]
+            explicit_repos = [self.make_git_pair(root / f"pair-{name}")[0] for name in ("b", "c", "d")]
+            session = root / "sessions" / "s.jsonl"
+            rows = session_rows("019fd1da-cc5d-7db1-b880-a14be6111c38")
+            rows[0]["payload"]["cwd"] = str(repo_a)
+            tool_rows = []
+            for idx, repo in enumerate(explicit_repos):
+                tool_rows.append(
+                    {
+                        "timestamp": f"2026-09-05T10:00:0{idx + 3}Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call",
+                            "name": "exec_command",
+                            "arguments": json.dumps({"cmd": "true", "workdir": str(repo)}),
+                        },
+                    }
+                )
+            rows = rows[:3] + tool_rows + rows[4:]
+            write_jsonl(session, rows)
+            with publisher.connect_state(root / "state") as con:
+                cycles, _events = publisher.parse_session(session, con)
+                cycle = cycles[0]
+                con.execute(
+                    """
+                    INSERT INTO cycles (cycle_key,session_id,chat_id,final_event_id,source_path,source_sha256,published_commit,updated_at_utc)
+                    VALUES (?,?,?,?,?,?,?,?)
+                    """,
+                    published_cycle_sql(cycle),
+                )
+                recorded = publisher.record_git_completion_guard(con, cycle)
+                again = publisher.record_git_completion_guard(con, cycle)
+            self.assertEqual([str(repo) for repo in explicit_repos], cycle["metrics"]["repo_projects"])
+            self.assertNotIn(str(repo_a), cycle["metrics"]["repo_projects"])
+            self.assertEqual([str(repo) for repo in explicit_repos], [row["repo_path"] for row in recorded])
+            self.assertTrue(all(row["idempotent"] for row in again))
+
+    def test_session_cwd_repo_is_fallback_when_no_explicit_repo_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _bare = self.make_git_pair(root / "pair")
+            session = root / "sessions" / "s.jsonl"
+            rows = session_rows("019fd1da-cc5d-7db1-b880-a14be6111c38")
+            rows[0]["payload"]["cwd"] = str(repo)
+            write_jsonl(session, rows)
+            with publisher.connect_state(root / "state") as con:
+                cycles, _events = publisher.parse_session(session, con)
+            self.assertEqual([str(repo)], cycles[0]["metrics"]["repo_projects"])
+
+    def test_parse_session_reads_rollout_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session = root / "sessions" / "s.jsonl"
+            write_jsonl(session, session_rows("019fd1da-cc5d-7db1-b880-a14be6111c38"))
+            original = Path.read_text
+            reads = 0
+
+            def counted(path_self, *args, **kwargs):
+                nonlocal reads
+                if path_self == session:
+                    reads += 1
+                return original(path_self, *args, **kwargs)
+
+            with publisher.connect_state(root / "state") as con, mock.patch.object(Path, "read_text", counted):
+                publisher.parse_session(session, con)
+            self.assertEqual(1, reads)
+
+    def test_guard_metadata_only_fingerprint_change_is_noop_but_status_change_publishes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_a = self.make_git_pair(root / "pair-a")[0]
+            repo_b = self.make_git_pair(root / "pair-b")[0]
+            session = root / "sessions" / "s.jsonl"
+            rows = session_rows("019fd1da-cc5d-7db1-b880-a14be6111c38")
+            rows[0]["payload"]["cwd"] = str(repo_a)
+            write_jsonl(session, rows)
+            with publisher.connect_state(root / "state") as con:
+                cycles, _events = publisher.parse_session(session, con)
+                cycle = cycles[0]
+                old_full = publisher._full_fingerprint(cycle)
+                metrics = cycle["metrics"]
+                con.execute(
+                    """
+                    INSERT INTO cycles (cycle_key,session_id,chat_id,final_event_id,source_path,source_sha256,cycle_sha256,published_commit,prompt_id,updated_at_utc)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        metrics["cycle_key"],
+                        metrics["native_session_id"],
+                        metrics["chat_id"],
+                        cycle["final_event_id"],
+                        metrics["source_path"],
+                        old_full,
+                        old_full,
+                        "abc123",
+                        metrics["prompt_id"],
+                        publisher.legacy.utc_stamp(),
+                    ),
+                )
+                con.commit()
+                cycle["metrics"]["repo_project"] = str(repo_b)
+                cycle["metrics"]["repo_projects"] = [str(repo_b)]
+                publisher._should_export = False
+                publisher._guard_candidate_cycles = {}
+                cycles, _events = publisher.parse_session(session, con)
+                self.assertFalse(publisher._should_export)
+
+                rows[-1]["payload"]["last_agent_message"] = "RESULT=FAIL"
+                rows[-2]["payload"]["content"][0]["text"] = "RESULT=FAIL"
+                write_jsonl(session, rows)
+                publisher._should_export = False
+                cycles, _events = publisher.parse_session(session, con)
+                self.assertTrue(publisher._should_export)
 
     def test_noop_run_does_not_invoke_guard_again(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

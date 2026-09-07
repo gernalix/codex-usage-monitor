@@ -107,23 +107,30 @@ def _repo_root(path_text: str | None) -> Path | None:
 
 def classify_git_repo(repo: Path, *, fetch: bool = True) -> dict[str, Any]:
     branch_result = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], repo)
-    branch = branch_result.stdout.strip() if branch_result.returncode == 0 else None
+    if branch_result.returncode != 0:
+        return {"repo_path": str(repo), "status": "unknown", "branch": None, "upstream": None, "ahead": None, "behind": None, "dirty_count": None, "fetched": 0, "detail": "branch_failed"}
+    branch = branch_result.stdout.strip()
     upstream_result = _run_git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], repo)
     upstream = upstream_result.stdout.strip() if upstream_result.returncode == 0 else None
     fetched = 0
     if fetch and upstream:
         remote = upstream.split("/", 1)[0]
         fetch_result = _run_git(["fetch", remote, branch or "HEAD"], repo, timeout=60)
-        fetched = 1 if fetch_result.returncode == 0 else 0
+        if fetch_result.returncode != 0:
+            return {"repo_path": str(repo), "status": "unknown", "branch": branch, "upstream": upstream, "ahead": None, "behind": None, "dirty_count": None, "fetched": 0, "detail": "fetch_failed"}
+        fetched = 1
     status_lines = _run_git(["status", "--porcelain"], repo).stdout.splitlines()
     dirty_count = len([line for line in status_lines if line.strip()])
     ahead = behind = None
     if upstream:
         counts = _run_git(["rev-list", "--left-right", "--count", f"HEAD...{upstream}"], repo)
-        if counts.returncode == 0:
-            parts = counts.stdout.split()
-            if len(parts) == 2:
-                ahead, behind = int(parts[0]), int(parts[1])
+        parts = counts.stdout.split()
+        if counts.returncode != 0 or len(parts) != 2:
+            return {"repo_path": str(repo), "status": "unknown", "branch": branch, "upstream": upstream, "ahead": None, "behind": None, "dirty_count": dirty_count, "fetched": fetched, "detail": "rev_list_failed"}
+        try:
+            ahead, behind = int(parts[0]), int(parts[1])
+        except ValueError:
+            return {"repo_path": str(repo), "status": "unknown", "branch": branch, "upstream": upstream, "ahead": None, "behind": None, "dirty_count": dirty_count, "fetched": fetched, "detail": "rev_list_malformed"}
     if not upstream:
         status = "dirty" if dirty_count else "no_upstream"
     elif dirty_count:
@@ -264,6 +271,12 @@ def _explicit_paths_from_payload(payload: dict[str, Any]) -> list[str]:
 
 
 def _fingerprint(cycle: dict[str, Any]) -> str:
+    metrics = {key: value for key, value in cycle["metrics"].items() if key not in {"repo_project", "repo_paths", "repo_projects"}}
+    payload = {"metrics": metrics, "events": cycle["events"]}
+    return legacy.digest_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+def _full_fingerprint(cycle: dict[str, Any]) -> str:
     payload = {"metrics": cycle["metrics"], "events": cycle["events"]}
     return legacy.digest_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
@@ -271,43 +284,17 @@ def _fingerprint(cycle: dict[str, Any]) -> str:
 def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     global _should_export
     cycles, events = _legacy_parse_session(path, con)
-    session_cwd: str | None = None
-    cwd_by_turn: dict[str, str] = {}
-    repo_paths_by_turn: dict[str, list[str]] = {}
-    active_turn_id: str | None = None
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        if not line.strip():
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
-        if obj.get("type") == "session_meta" and isinstance(payload.get("cwd"), str):
-            session_cwd = payload["cwd"]
-        if obj.get("type") == "turn_context" and isinstance(payload.get("cwd"), str):
-            turn_id = str(payload.get("turn_id") or "")
-            active_turn_id = turn_id or active_turn_id
-            if turn_id:
-                cwd_by_turn[turn_id] = payload["cwd"]
-        elif obj.get("type") == "turn_context":
-            active_turn_id = str(payload.get("turn_id") or active_turn_id or "")
-        if payload.get("type") in {"function_call", "custom_tool_call"}:
-            turn_id = str(((payload.get("internal_chat_message_metadata_passthrough") or {}).get("turn_id")) or active_turn_id or "")
-            if turn_id:
-                repo_paths_by_turn.setdefault(turn_id, []).extend(_explicit_paths_from_payload(payload))
     last_prompt_id: str | None = None
     migrated = False
 
     for cycle in cycles:
         metrics = cycle["metrics"]
-        if not metrics.get("repo_project"):
-            metrics["repo_project"] = cwd_by_turn.get(str(metrics.get("turn_id") or "")) or session_cwd
-        candidate_paths = list(repo_paths_by_turn.get(str(metrics.get("turn_id") or ""), []))
-        fallback = metrics.get("repo_project")
-        if isinstance(fallback, str):
-            candidate_paths.append(fallback)
-        metrics["repo_projects"] = [str(repo) for repo in _repo_roots(candidate_paths)]
+        explicit_repos = [str(repo) for repo in _repo_roots(list(metrics.get("repo_paths") or []))]
+        if explicit_repos:
+            metrics["repo_projects"] = explicit_repos
+        else:
+            fallback = metrics.get("repo_project")
+            metrics["repo_projects"] = [str(repo) for repo in _repo_roots([fallback] if isinstance(fallback, str) else [])]
         if metrics["repo_projects"]:
             metrics["repo_project"] = metrics["repo_projects"][0]
         metrics["status"] = status_from_final(str(metrics.get("final_response_redacted") or ""))
@@ -327,6 +314,7 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
             last_prompt_id = str(prompt_id)
 
         fingerprint = _fingerprint(cycle)
+        full_fingerprint = _full_fingerprint(cycle)
         cycle["source_sha256"] = fingerprint
         cycle["cycle_sha256"] = fingerprint
         key = str(metrics["cycle_key"])
@@ -350,7 +338,7 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
             cycle_sha = row["cycle_sha256"] if row else None
 
         is_new = row is None or row["published_commit"] is None
-        content_changed = row is not None and cycle_sha is not None and source_sha != fingerprint
+        content_changed = row is not None and cycle_sha is not None and source_sha not in {fingerprint, full_fingerprint}
         prompt_changed = row is not None and row["prompt_id"] != metrics.get("prompt_id")
         if is_new or content_changed or prompt_changed:
             _should_export = True
