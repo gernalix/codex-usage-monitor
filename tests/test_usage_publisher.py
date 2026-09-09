@@ -563,13 +563,22 @@ class UsagePublisherTests(unittest.TestCase):
             (repo_a / "dirty.txt").write_text("preexisting\n", encoding="utf-8")
             session = root / "sessions" / "s.jsonl"
             rows = session_rows("019fd1da-cc5d-7db1-b880-a14be6111c38")
+            rows[1]["payload"]["cwd"] = str(repo_b)
             rows.insert(
                 3,
                 {"timestamp": "2026-09-05T10:00:03Z", "type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": json.dumps({"cmd": "true", "workdir": str(repo_a)})}},
             )
             rows.insert(
                 4,
-                {"timestamp": "2026-09-05T10:00:04Z", "type": "response_item", "payload": {"type": "function_call", "name": "apply_patch", "arguments": json.dumps({"path": str(repo_b / "file.txt")})}},
+                {
+                    "timestamp": "2026-09-05T10:00:04Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "custom_tool_call",
+                        "name": "apply_patch",
+                        "input": "*** Begin Patch\n*** Update File: file.txt\n*** End Patch",
+                    },
+                },
             )
             write_jsonl(session, rows)
             with publisher.connect_state(root / "state") as con:
