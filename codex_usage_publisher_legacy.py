@@ -227,6 +227,28 @@ def explicit_paths_from_payload(payload: dict[str, Any]) -> list[str]:
     return paths
 
 
+def apply_patch_paths_from_payload(payload: dict[str, Any], cwd: str | None) -> list[str]:
+    raw = payload.get("arguments")
+    if not isinstance(raw, str):
+        raw = payload.get("input")
+    if not isinstance(raw, str):
+        return explicit_paths_from_payload(payload)
+
+    args = json_obj(raw)
+    patch = args.get("patch") if isinstance(args.get("patch"), str) else raw
+    base = Path(cwd).expanduser() if cwd else None
+    paths: list[str] = []
+    for match in re.finditer(r"(?m)^\*\*\* (?:Add|Update|Delete) File: (.+?)\s*$", patch):
+        value = match.group(1).strip()
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            if base is None:
+                continue
+            path = base / path
+        paths.append(str(path))
+    return paths
+
+
 def status_from_final(text: str) -> str:
     first = next((line.strip().upper() for line in text.splitlines() if line.strip()), "")
     return first if first in {"PASS", "FAIL", "PARTIAL", "BLOCKED_REPO_PUBLIC"} else "UNKNOWN"
@@ -316,9 +338,14 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
                 current["tool_calls"] += 1
                 name = str(payload.get("name") or ptype)
                 current["tool_calls_by_type"][name] = current["tool_calls_by_type"].get(name, 0) + 1
-                current["repo_paths"].extend(explicit_paths_from_payload(payload))
+                payload_paths = (
+                    apply_patch_paths_from_payload(payload, current.get("cwd"))
+                    if name == "apply_patch"
+                    else explicit_paths_from_payload(payload)
+                )
+                current["repo_paths"].extend(payload_paths)
                 if name == "apply_patch":
-                    current["repo_write_paths"].extend(explicit_paths_from_payload(payload))
+                    current["repo_write_paths"].extend(payload_paths)
             if ptype == "message" and payload.get("role") == "user" and not current["prompt_text"]:
                 current["prompt_text"] = archive.redact_text(extract_output_text(payload))
                 current["prompt_id"] = prompt_id_from_text(current["prompt_text"])
