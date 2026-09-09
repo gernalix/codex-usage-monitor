@@ -13,6 +13,8 @@ from codex_usage_publisher_legacy import *  # noqa: F401,F403
 
 
 VERSION = "2026.09.07"
+FINGERPRINT_SCHEMA = 2
+GUARD_METADATA_KEYS = {"repo_project", "repo_paths", "repo_projects", "repo_write_projects", "repo_path_kinds"}
 _GOAL_PREFIX = '<codex_internal_context source="goal">'
 _legacy_connect_state = legacy.connect_state
 _legacy_parse_session = legacy.parse_session
@@ -47,6 +49,8 @@ def connect_state(state_dir: Path) -> sqlite3.Connection:
     columns = {str(row["name"]) for row in con.execute("PRAGMA table_info(cycles)")}
     if "cycle_sha256" not in columns:
         con.execute("ALTER TABLE cycles ADD COLUMN cycle_sha256 TEXT")
+    if "fingerprint_schema" not in columns:
+        con.execute("ALTER TABLE cycles ADD COLUMN fingerprint_schema INTEGER")
     con.executescript(
         """
         CREATE TABLE IF NOT EXISTS git_completion_guard (
@@ -110,8 +114,16 @@ def classify_git_repo(repo: Path, *, fetch: bool = True) -> dict[str, Any]:
     if branch_result.returncode != 0:
         return {"repo_path": str(repo), "status": "unknown", "branch": None, "upstream": None, "ahead": None, "behind": None, "dirty_count": None, "fetched": 0, "detail": "branch_failed"}
     branch = branch_result.stdout.strip()
-    upstream_result = _run_git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], repo)
-    upstream = upstream_result.stdout.strip() if upstream_result.returncode == 0 else None
+    upstream_check = _run_git(["rev-parse", "--verify", "--quiet", "@{u}"], repo)
+    if upstream_check.returncode == 0:
+        upstream_result = _run_git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], repo)
+        if upstream_result.returncode != 0:
+            return {"repo_path": str(repo), "status": "unknown", "branch": branch, "upstream": None, "ahead": None, "behind": None, "dirty_count": None, "fetched": 0, "detail": "upstream_resolve_failed"}
+        upstream = upstream_result.stdout.strip()
+    elif upstream_check.returncode == 1:
+        upstream = None
+    else:
+        return {"repo_path": str(repo), "status": "unknown", "branch": branch, "upstream": None, "ahead": None, "behind": None, "dirty_count": None, "fetched": 0, "detail": "upstream_check_failed"}
     fetched = 0
     if fetch and upstream:
         remote = upstream.split("/", 1)[0]
@@ -119,7 +131,10 @@ def classify_git_repo(repo: Path, *, fetch: bool = True) -> dict[str, Any]:
         if fetch_result.returncode != 0:
             return {"repo_path": str(repo), "status": "unknown", "branch": branch, "upstream": upstream, "ahead": None, "behind": None, "dirty_count": None, "fetched": 0, "detail": "fetch_failed"}
         fetched = 1
-    status_lines = _run_git(["status", "--porcelain"], repo).stdout.splitlines()
+    status_result = _run_git(["status", "--porcelain"], repo)
+    if status_result.returncode != 0:
+        return {"repo_path": str(repo), "status": "unknown", "branch": branch, "upstream": upstream, "ahead": None, "behind": None, "dirty_count": None, "fetched": fetched, "detail": "status_failed"}
+    status_lines = status_result.stdout.splitlines()
     dirty_count = len([line for line in status_lines if line.strip()])
     ahead = behind = None
     if upstream:
@@ -171,7 +186,9 @@ def record_git_completion_guard(con: sqlite3.Connection, cycle: dict[str, Any]) 
     existing_rows = con.execute("SELECT repo_path,status FROM git_completion_guard_repos WHERE cycle_key=?", (cycle_key,)).fetchall()
     if existing_rows:
         return [{"cycle_key": cycle_key, "repo_path": row["repo_path"], "status": row["status"], "idempotent": True} for row in existing_rows]
-    repos = _repo_roots(list(metrics.get("repo_projects") or []))
+    write_repos = _repo_roots(list(metrics.get("repo_write_projects") or []))
+    repos = write_repos or _repo_roots(list(metrics.get("repo_projects") or []))
+    actionable = bool(write_repos)
     guard_rows: list[dict[str, Any]] = []
     if not repos:
         guard_rows.append(
@@ -240,7 +257,7 @@ def record_git_completion_guard(con: sqlite3.Connection, cycle: dict[str, Any]) 
                 legacy.utc_stamp(),
             ),
         )
-    return [{"cycle_key": cycle_key, **guard, "idempotent": False} for guard in guard_rows]
+    return [{"cycle_key": cycle_key, **guard, "actionable": actionable, "idempotent": False} for guard in guard_rows]
 
 
 def _json_obj(value: Any) -> dict[str, Any]:
@@ -270,8 +287,23 @@ def _explicit_paths_from_payload(payload: dict[str, Any]) -> list[str]:
     return paths
 
 
+def _tool_path_kind(payload: dict[str, Any]) -> str:
+    name = str(payload.get("name") or "")
+    if name == "apply_patch":
+        return "write"
+    if name in {"exec_command", "shell"}:
+        return "workdir_only"
+    return "association"
+
+
+def _write_paths_from_payload(payload: dict[str, Any]) -> list[str]:
+    if _tool_path_kind(payload) != "write":
+        return []
+    return _explicit_paths_from_payload(payload)
+
+
 def _fingerprint(cycle: dict[str, Any]) -> str:
-    metrics = {key: value for key, value in cycle["metrics"].items() if key not in {"repo_project", "repo_paths", "repo_projects"}}
+    metrics = {key: value for key, value in cycle["metrics"].items() if key not in GUARD_METADATA_KEYS}
     payload = {"metrics": metrics, "events": cycle["events"]}
     return legacy.digest_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
@@ -290,11 +322,14 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
     for cycle in cycles:
         metrics = cycle["metrics"]
         explicit_repos = [str(repo) for repo in _repo_roots(list(metrics.get("repo_paths") or []))]
+        write_repos = [str(repo) for repo in _repo_roots(list(metrics.get("repo_write_paths") or []))]
         if explicit_repos:
             metrics["repo_projects"] = explicit_repos
         else:
             fallback = metrics.get("repo_project")
             metrics["repo_projects"] = [str(repo) for repo in _repo_roots([fallback] if isinstance(fallback, str) else [])]
+        metrics["repo_write_projects"] = sorted(set(write_repos))
+        metrics.pop("repo_write_paths", None)
         if metrics["repo_projects"]:
             metrics["repo_project"] = metrics["repo_projects"][0]
         metrics["status"] = status_from_final(str(metrics.get("final_response_redacted") or ""))
@@ -317,18 +352,19 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
         full_fingerprint = _full_fingerprint(cycle)
         cycle["source_sha256"] = fingerprint
         cycle["cycle_sha256"] = fingerprint
+        cycle["fingerprint_schema"] = FINGERPRINT_SCHEMA
         key = str(metrics["cycle_key"])
         row = con.execute(
-            "SELECT source_sha256,cycle_sha256,published_commit,prompt_id,telegram_sent FROM cycles WHERE cycle_key=?",
+            "SELECT source_sha256,cycle_sha256,published_commit,prompt_id,telegram_sent,fingerprint_schema FROM cycles WHERE cycle_key=?",
             (key,),
         ).fetchone()
 
         # One-time migration: old rows stored the SHA of the entire growing rollout.
         # Seed the stable per-cycle fingerprint without making every old cycle pending once.
-        if row and row["published_commit"] and row["cycle_sha256"] is None and row["prompt_id"] == metrics.get("prompt_id"):
+        if row and row["published_commit"] and (row["fingerprint_schema"] or 1) < FINGERPRINT_SCHEMA and row["prompt_id"] == metrics.get("prompt_id"):
             con.execute(
-                "UPDATE cycles SET source_sha256=?,cycle_sha256=?,updated_at_utc=? WHERE cycle_key=?",
-                (fingerprint, fingerprint, legacy.utc_stamp(), key),
+                "UPDATE cycles SET source_sha256=?,cycle_sha256=?,fingerprint_schema=?,updated_at_utc=? WHERE cycle_key=?",
+                (fingerprint, fingerprint, FINGERPRINT_SCHEMA, legacy.utc_stamp(), key),
             )
             migrated = True
             source_sha = fingerprint
@@ -338,7 +374,7 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
             cycle_sha = row["cycle_sha256"] if row else None
 
         is_new = row is None or row["published_commit"] is None
-        content_changed = row is not None and cycle_sha is not None and source_sha not in {fingerprint, full_fingerprint}
+        content_changed = row is not None and cycle_sha is not None and row["published_commit"] and source_sha != fingerprint
         prompt_changed = row is not None and row["prompt_id"] != metrics.get("prompt_id")
         if is_new or content_changed or prompt_changed:
             _should_export = True
@@ -401,7 +437,7 @@ def command_run(args) -> int:
                 if row and row["published_commit"]:
                     guard_rows.extend(record_git_completion_guard(con, cycle))
             con.commit()
-        anomalies = [row for row in guard_rows if row.get("status") not in {"clean_synced"} and not row.get("idempotent")]
+        anomalies = [row for row in guard_rows if row.get("actionable") and row.get("status") not in {"clean_synced"} and not row.get("idempotent")]
         if anomalies:
             print(json.dumps({"git_completion_guard": anomalies}, sort_keys=True))
     return result

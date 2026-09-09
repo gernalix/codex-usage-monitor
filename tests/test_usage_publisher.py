@@ -6,6 +6,7 @@ from pathlib import Path
 import unittest
 from unittest import mock
 
+import deploy_runtime
 import codex_usage_publisher as publisher
 
 
@@ -252,6 +253,40 @@ class UsagePublisherTests(unittest.TestCase):
             self.assertEqual("unknown", result["status"])
             self.assertEqual("fetch_failed", result["detail"])
 
+    def test_git_completion_guard_status_and_upstream_errors_are_conservative(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _bare = self.make_git_pair(Path(tmp))
+
+            def fake_status_failure(args, cwd, timeout=30):
+                if args[:3] == ["rev-parse", "--abbrev-ref", "HEAD"]:
+                    return publisher.subprocess.CompletedProcess(args, 0, "main\n", "")
+                if args[:4] == ["rev-parse", "--verify", "--quiet", "@{u}"]:
+                    return publisher.subprocess.CompletedProcess(args, 0, "", "")
+                if args[:4] == ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]:
+                    return publisher.subprocess.CompletedProcess(args, 0, "origin/main\n", "")
+                if args[:2] == ["fetch", "origin"]:
+                    return publisher.subprocess.CompletedProcess(args, 0, "", "")
+                if args[:2] == ["status", "--porcelain"]:
+                    return publisher.subprocess.CompletedProcess(args, 1, "", "status failed")
+                return publisher.subprocess.CompletedProcess(args, 0, "", "")
+
+            with mock.patch.object(publisher, "_run_git", side_effect=fake_status_failure):
+                result = publisher.classify_git_repo(repo)
+            self.assertEqual("unknown", result["status"])
+            self.assertEqual("status_failed", result["detail"])
+
+            def fake_upstream_error(args, cwd, timeout=30):
+                if args[:3] == ["rev-parse", "--abbrev-ref", "HEAD"]:
+                    return publisher.subprocess.CompletedProcess(args, 0, "main\n", "")
+                if args[:4] == ["rev-parse", "--verify", "--quiet", "@{u}"]:
+                    return publisher.subprocess.CompletedProcess(args, 2, "", "ambiguous")
+                return publisher.subprocess.CompletedProcess(args, 0, "", "")
+
+            with mock.patch.object(publisher, "_run_git", side_effect=fake_upstream_error):
+                result = publisher.classify_git_repo(repo)
+            self.assertEqual("unknown", result["status"])
+            self.assertEqual("upstream_check_failed", result["detail"])
+
     def test_git_completion_guard_rev_list_failure_is_unknown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo, _bare = self.make_git_pair(Path(tmp))
@@ -468,6 +503,108 @@ class UsagePublisherTests(unittest.TestCase):
                 publisher._should_export = False
                 cycles, _events = publisher.parse_session(session, con)
                 self.assertTrue(publisher._should_export)
+
+    def test_fingerprint_schema_migration_is_noop_and_idempotent_until_real_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session = root / "sessions" / "s.jsonl"
+            write_jsonl(session, session_rows("019fd1da-cc5d-7db1-b880-a14be6111c38"))
+            with publisher.connect_state(root / "state") as con:
+                cycles, _events = publisher.parse_session(session, con)
+                cycle = cycles[0]
+                metrics = cycle["metrics"]
+                con.execute(
+                    """
+                    INSERT INTO cycles (cycle_key,session_id,chat_id,prompt_id,turn_id,final_event_id,source_path,source_sha256,cycle_sha256,fingerprint_schema,published_commit,telegram_sent,updated_at_utc)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        metrics["cycle_key"],
+                        metrics["native_session_id"],
+                        metrics["chat_id"],
+                        metrics["prompt_id"],
+                        metrics["turn_id"],
+                        cycle["final_event_id"],
+                        metrics["source_path"],
+                        "legacy-fingerprint",
+                        "legacy-fingerprint",
+                        1,
+                        "abc123",
+                        1,
+                        publisher.legacy.utc_stamp(),
+                    ),
+                )
+                con.commit()
+                publisher._should_export = False
+                publisher._notify_cycle_objects = set()
+                publisher.parse_session(session, con)
+                self.assertFalse(publisher._should_export)
+                self.assertEqual(0, len(publisher._notify_cycle_objects))
+                row = con.execute("SELECT fingerprint_schema FROM cycles WHERE cycle_key=?", (metrics["cycle_key"],)).fetchone()
+                self.assertEqual(publisher.FINGERPRINT_SCHEMA, row["fingerprint_schema"])
+
+                publisher._should_export = False
+                publisher.parse_session(session, con)
+                self.assertFalse(publisher._should_export)
+
+                rows = session_rows("019fd1da-cc5d-7db1-b880-a14be6111c38")
+                rows[-2]["payload"]["content"][0]["text"] = "RESULT=PASS\nnew final evidence"
+                rows[-1]["payload"]["last_agent_message"] = "RESULT=PASS\nnew final evidence"
+                write_jsonl(session, rows)
+                publisher._should_export = False
+                publisher.parse_session(session, con)
+                self.assertTrue(publisher._should_export)
+
+    def test_workdir_only_dirty_repo_is_not_actionable_when_write_repo_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_a = self.make_git_pair(root / "pair-a")[0]
+            repo_b = self.make_git_pair(root / "pair-b")[0]
+            (repo_a / "dirty.txt").write_text("preexisting\n", encoding="utf-8")
+            session = root / "sessions" / "s.jsonl"
+            rows = session_rows("019fd1da-cc5d-7db1-b880-a14be6111c38")
+            rows.insert(
+                3,
+                {"timestamp": "2026-09-05T10:00:03Z", "type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": json.dumps({"cmd": "true", "workdir": str(repo_a)})}},
+            )
+            rows.insert(
+                4,
+                {"timestamp": "2026-09-05T10:00:04Z", "type": "response_item", "payload": {"type": "function_call", "name": "apply_patch", "arguments": json.dumps({"path": str(repo_b / "file.txt")})}},
+            )
+            write_jsonl(session, rows)
+            with publisher.connect_state(root / "state") as con:
+                cycles, _events = publisher.parse_session(session, con)
+                cycle = cycles[0]
+                con.execute(
+                    """
+                    INSERT INTO cycles (cycle_key,session_id,chat_id,final_event_id,source_path,source_sha256,published_commit,updated_at_utc)
+                    VALUES (?,?,?,?,?,?,?,?)
+                    """,
+                    published_cycle_sql(cycle),
+                )
+                recorded = publisher.record_git_completion_guard(con, cycle)
+            self.assertIn(str(repo_a), cycle["metrics"]["repo_projects"])
+            self.assertEqual([str(repo_b)], cycle["metrics"]["repo_write_projects"])
+            self.assertEqual([str(repo_b)], [row["repo_path"] for row in recorded])
+            self.assertTrue(all(row["actionable"] for row in recorded))
+
+    def test_deploy_runtime_rejects_dirty_and_unsynced_head(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, bare = self.make_git_pair(root / "pair")
+            for name in deploy_runtime.RUNTIME_FILES:
+                (repo / name).write_text("print('ok')\n", encoding="utf-8")
+            publisher.run(["git", "add", *deploy_runtime.RUNTIME_FILES], repo)
+            publisher.run(["git", "commit", "-m", "runtime files"], repo)
+            publisher.run(["git", "push", "origin", "main"], repo)
+            (repo / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+            with self.assertRaisesRegex(deploy_runtime.DeployError, "worktree dirty"):
+                deploy_runtime.assert_clean_synced(repo)
+            (repo / "dirty.txt").unlink()
+            (repo / "codex_usage_publisher.py").write_text("print('ahead')\n", encoding="utf-8")
+            publisher.run(["git", "commit", "-am", "ahead"], repo)
+            with self.assertRaisesRegex(deploy_runtime.DeployError, "HEAD is not synchronized"):
+                deploy_runtime.assert_clean_synced(repo)
 
     def test_noop_run_does_not_invoke_guard_again(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

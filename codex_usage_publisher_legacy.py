@@ -290,6 +290,7 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
                 "reasoning_effort": settings.get("reasoning_effort") or payload.get("effort"),
                 "cwd": payload.get("cwd") or session_cwd,
                 "repo_paths": [],
+                "repo_write_paths": [],
                 "prompt_text": "",
                 "prompt_id": None,
                 "events": [],
@@ -316,6 +317,8 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
                 name = str(payload.get("name") or ptype)
                 current["tool_calls_by_type"][name] = current["tool_calls_by_type"].get(name, 0) + 1
                 current["repo_paths"].extend(explicit_paths_from_payload(payload))
+                if name == "apply_patch":
+                    current["repo_write_paths"].extend(explicit_paths_from_payload(payload))
             if ptype == "message" and payload.get("role") == "user" and not current["prompt_text"]:
                 current["prompt_text"] = archive.redact_text(extract_output_text(payload))
                 current["prompt_id"] = prompt_id_from_text(current["prompt_text"])
@@ -376,6 +379,7 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
                 "status": status_from_final(final),
                 "repo_project": current.get("cwd"),
                 "repo_paths": current.get("repo_paths") or [],
+                "repo_write_paths": current.get("repo_write_paths") or [],
             }
             cycles.append({"metrics": metrics, "events": current["events"], "final_event_id": f"{path}:{line_no}", "source_sha256": sha})
             current = None
@@ -588,15 +592,17 @@ def command_run(args: argparse.Namespace) -> int:
                         m = cycle["metrics"]
                         con.execute(
                             """
-                            INSERT INTO cycles (cycle_key,session_id,chat_id,prompt_id,turn_id,final_event_id,source_path,source_sha256,completed_at_utc,published_commit,telegram_sent,updated_at_utc)
-                            VALUES (?,?,?,?,?,?,?,?,?,?,0,?)
+                            INSERT INTO cycles (cycle_key,session_id,chat_id,prompt_id,turn_id,final_event_id,source_path,source_sha256,cycle_sha256,fingerprint_schema,completed_at_utc,published_commit,telegram_sent,updated_at_utc)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,?)
                             ON CONFLICT(cycle_key) DO UPDATE SET
                                 prompt_id=excluded.prompt_id,
                                 source_sha256=excluded.source_sha256,
+                                cycle_sha256=excluded.cycle_sha256,
+                                fingerprint_schema=excluded.fingerprint_schema,
                                 published_commit=excluded.published_commit,
                                 updated_at_utc=excluded.updated_at_utc
                             """,
-                            (m["cycle_key"], m["native_session_id"], m["chat_id"], m.get("prompt_id"), m.get("turn_id"), cycle["final_event_id"], m["source_path"], cycle["source_sha256"], m.get("timestamp_end_utc"), current_commit, utc_stamp()),
+                            (m["cycle_key"], m["native_session_id"], m["chat_id"], m.get("prompt_id"), m.get("turn_id"), cycle["final_event_id"], m["source_path"], cycle["source_sha256"], cycle.get("cycle_sha256", cycle["source_sha256"]), cycle.get("fingerprint_schema"), m.get("timestamp_end_utc"), current_commit, utc_stamp()),
                         )
                         retry_cycles.append(cycle)
                 if retry_cycles:
@@ -630,15 +636,17 @@ def command_run(args: argparse.Namespace) -> int:
                 m = cycle["metrics"]
                 con.execute(
                     """
-                    INSERT INTO cycles (cycle_key,session_id,chat_id,prompt_id,turn_id,final_event_id,source_path,source_sha256,completed_at_utc,published_commit,telegram_sent,updated_at_utc)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,0,?)
+                    INSERT INTO cycles (cycle_key,session_id,chat_id,prompt_id,turn_id,final_event_id,source_path,source_sha256,cycle_sha256,fingerprint_schema,completed_at_utc,published_commit,telegram_sent,updated_at_utc)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,?)
                     ON CONFLICT(cycle_key) DO UPDATE SET
                         prompt_id=excluded.prompt_id,
                         source_sha256=excluded.source_sha256,
+                        cycle_sha256=excluded.cycle_sha256,
+                        fingerprint_schema=excluded.fingerprint_schema,
                         published_commit=excluded.published_commit,
                         updated_at_utc=excluded.updated_at_utc
                     """,
-                    (m["cycle_key"], m["native_session_id"], m["chat_id"], m.get("prompt_id"), m.get("turn_id"), cycle["final_event_id"], m["source_path"], cycle["source_sha256"], m.get("timestamp_end_utc"), commit, utc_stamp()),
+                    (m["cycle_key"], m["native_session_id"], m["chat_id"], m.get("prompt_id"), m.get("turn_id"), cycle["final_event_id"], m["source_path"], cycle["source_sha256"], cycle.get("cycle_sha256", cycle["source_sha256"]), cycle.get("fingerprint_schema"), m.get("timestamp_end_utc"), commit, utc_stamp()),
                 )
             con.commit()
             if pending_cycles:
