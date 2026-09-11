@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 from pathlib import Path
 import py_compile
 import shutil
@@ -40,7 +42,13 @@ def assert_clean_synced(source: Path) -> str:
         raise DeployError("git status failed")
     if status.stdout.strip():
         raise DeployError("worktree dirty")
+
     upstream = git_stdout(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], source)
+    remote = upstream.split("/", 1)[0] if "/" in upstream else upstream
+    fetched = run(["git", "fetch", remote], source, timeout=180)
+    if fetched.returncode != 0:
+        raise DeployError(f"git fetch {remote} failed: {(fetched.stderr or fetched.stdout).strip()}")
+
     head = git_stdout(["rev-parse", "HEAD"], source)
     upstream_sha = git_stdout(["rev-parse", upstream], source)
     if head != upstream_sha:
@@ -48,12 +56,68 @@ def assert_clean_synced(source: Path) -> str:
     return head
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def runtime_hashes(root: Path) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for name in RUNTIME_FILES:
+        path = root / name
+        if not path.is_file():
+            raise DeployError(f"missing runtime file: {name}")
+        hashes[name] = file_sha256(path)
+    return hashes
+
+
 def compile_release(release: Path) -> None:
     for name in RUNTIME_FILES:
         path = release / name
         if not path.is_file():
             raise DeployError(f"missing runtime file: {name}")
-        py_compile.compile(str(path), doraise=True)
+        try:
+            compile(path.read_text(encoding="utf-8"), str(path), "exec")
+        except SyntaxError as exc:
+            raise py_compile.PyCompileError(exc, dfile=str(path)) from exc
+
+
+def write_manifest(release: Path, *, commit: str, source: Path, hashes: dict[str, str]) -> None:
+    payload = {
+        "commit": commit,
+        "source": str(source),
+        "files": hashes,
+    }
+    (release / "manifest.json").write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+
+def verify_release(release: Path, *, commit: str, expected_hashes: dict[str, str]) -> None:
+    manifest_path = release / "manifest.json"
+    if not manifest_path.is_file():
+        raise DeployError(f"release missing manifest: {release}")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DeployError(f"invalid release manifest: {release}") from exc
+    if manifest.get("commit") != commit:
+        raise DeployError(f"release commit mismatch: {release}")
+    if manifest.get("files") != expected_hashes:
+        raise DeployError(f"release manifest hash mismatch: {release}")
+    actual_hashes = runtime_hashes(release)
+    if actual_hashes != expected_hashes:
+        raise DeployError(f"release file integrity mismatch: {release}")
+    compile_release(release)
+
+
+def make_release_read_only(release: Path) -> None:
+    for name in (*RUNTIME_FILES, "manifest.json"):
+        path = release / name
+        if path.exists():
+            path.chmod(0o444)
+    release.chmod(0o555)
 
 
 def atomic_switch(current: Path, release: Path) -> None:
@@ -68,23 +132,24 @@ def deploy(source: Path, runtime_root: Path) -> dict[str, str]:
     source = source.resolve()
     runtime_root.mkdir(parents=True, exist_ok=True)
     commit = assert_clean_synced(source)
+    expected_hashes = runtime_hashes(source)
     releases = runtime_root / "releases"
+    releases.mkdir(parents=True, exist_ok=True)
     release = releases / commit
+
     if release.exists():
-        compile_release(release)
+        verify_release(release, commit=commit, expected_hashes=expected_hashes)
     else:
-        with tempfile.TemporaryDirectory(prefix=f".{commit}.", dir=str(releases.parent if releases.exists() else runtime_root.parent)) as tmp:
+        with tempfile.TemporaryDirectory(prefix=f".{commit}.", dir=str(runtime_root)) as tmp:
             staging = Path(tmp) / commit
             staging.mkdir(parents=True)
             for name in RUNTIME_FILES:
-                src = source / name
-                if not src.is_file():
-                    raise DeployError(f"missing source file: {name}")
-                shutil.copy2(src, staging / name)
-            (staging / "manifest.json").write_text(json.dumps({"commit": commit, "source": str(source)}, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-            compile_release(staging)
-            releases.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source / name, staging / name)
+            write_manifest(staging, commit=commit, source=source, hashes=expected_hashes)
+            verify_release(staging, commit=commit, expected_hashes=expected_hashes)
+            make_release_read_only(staging)
             staging.replace(release)
+
     atomic_switch(runtime_root / "current", release)
     return {"commit": commit, "release": str(release), "current": str((runtime_root / "current").resolve())}
 
