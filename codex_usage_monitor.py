@@ -1250,6 +1250,22 @@ def snapshot_message_lines(row: sqlite3.Row, *, include_source: bool = False) ->
     ]
 
 
+def quota_change_message_lines(previous_state: dict[str, str], current: sqlite3.Row) -> list[str]:
+    current_state = quota_notification_state(current)
+    delta_text = "unavailable"
+    try:
+        previous_remaining = float(previous_state["weekly_remaining"])
+        current_remaining = float(current_state["weekly_remaining"])
+        delta_text = f"{current_remaining - previous_remaining:+.0f} pp"
+    except (KeyError, TypeError, ValueError):
+        pass
+    return [
+        f"Weekly remaining: {previous_state.get('weekly_remaining', 'unavailable')}% -> {current_state['weekly_remaining']}% ({delta_text})",
+        f"Weekly reset: {current_state['weekly_reset']}",
+        f"Usage limit resets available: {current_state['usage_limit_resets_available']}",
+    ]
+
+
 def quota_notification_state(row: sqlite3.Row) -> dict[str, str]:
     return {
         "weekly_remaining": normalize_number(row["weekly_remaining_percent"]),
@@ -1267,7 +1283,10 @@ def quota_state_from_message(message: str) -> dict[str, str] | None:
     values: dict[str, str] = {}
     for line in message.splitlines():
         if line.startswith("Weekly remaining: "):
-            values["weekly_remaining"] = normalize_number(line.removeprefix("Weekly remaining: ").removesuffix("%"))
+            raw = line.removeprefix("Weekly remaining: ")
+            if "->" in raw:
+                raw = raw.split("->", 1)[1].split("%", 1)[0].strip()
+            values["weekly_remaining"] = normalize_number(raw.removesuffix("%"))
         elif line.startswith("Weekly reset: "):
             values["weekly_reset"] = line.removeprefix("Weekly reset: ").strip()
         elif line.startswith("Usage limit resets available: "):
@@ -1318,7 +1337,7 @@ def build_notification_events(cfg: Config, con: sqlite3.Connection, snapshot_id:
                     quota_state_event_key(current_state),
                     "quota_change",
                     "Codex weekly quota changed",
-                    "\n".join(snapshot_message_lines(current)),
+                    "\n".join(quota_change_message_lines(previous_state, current)),
                 )
             )
     reset_raw = current["weekly_reset_at_utc"]
@@ -1395,6 +1414,7 @@ def send_telegram(cfg: Config, title: str, message: str) -> str:
     if not cfg.telegram_helper.exists():
         env = os.environ.copy()
         env.setdefault("TELEGRAM_NOTIFY_CONFIG", str(Path.home() / ".config/codex/secrets/telegram.env"))
+        env["TELEGRAM_PROJECT_ID"] = "8"
         result = subprocess.run(
             [sys.executable, "-m", "telegram_notify", title, message],
             text=True,
@@ -1410,9 +1430,9 @@ def send_telegram(cfg: Config, title: str, message: str) -> str:
     module = load_telegram_helper(cfg.telegram_helper)
     try:
         if hasattr(module, "send_message"):
-            module.send_message(title, message)
+            module.send_message(title, message, project_id=8)
         elif hasattr(module, "notify"):
-            module.notify(message, title=title)
+            module.notify(message, title=title, project_id=8)
         else:
             raise ConfigError("Telegram helper lacks send_message/notify")
     except SystemExit as exc:

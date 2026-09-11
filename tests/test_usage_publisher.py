@@ -8,6 +8,7 @@ from unittest import mock
 
 import deploy_runtime
 import codex_usage_publisher as publisher
+import codex_usage_publisher_legacy as legacy
 
 
 def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
@@ -167,6 +168,23 @@ class UsagePublisherTests(unittest.TestCase):
                 self.assertEqual(publisher.main(argv), 0)
                 self.assertEqual(publisher.main(argv), 0)
             self.assertEqual(send.call_count, 1)
+
+    def test_publisher_telegram_skips_normal_pushes_and_compacts_missing_prompt_id(self) -> None:
+        normal_cycle = {"metrics": {"chat_id": 178, "prompt_id": "417826", "cycle_key": "normal"}}
+        missing_cycles = [
+            {"metrics": {"chat_id": 178, "prompt_id": None, "cycle_key": f"missing-{index}"}}
+            for index in range(10)
+        ]
+        with mock.patch.object(legacy.quota, "send_telegram") as send:
+            self.assertTrue(publisher._legacy_send_batch_telegram([normal_cycle], False))
+            send.assert_not_called()
+            self.assertTrue(publisher._legacy_send_batch_telegram(missing_cycles, False))
+        send.assert_called_once()
+        title, message = send.call_args.args[1:]
+        self.assertEqual(title, "Codex usage")
+        self.assertIn("10 cicli final-response senza PROMPT_ID", message)
+        self.assertIn("missing-0", message)
+        self.assertIn("missing-9", message)
 
     def test_result_status_mapping_accepts_explicit_terminal_result(self) -> None:
         self.assertEqual("PASS", publisher.status_from_final("PROMPT_ID=1\nRESULT=PASS"))

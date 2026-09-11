@@ -202,10 +202,29 @@ class ResetCountParsingTests(unittest.TestCase):
                 events = monitor.build_notification_events(cfg, con, snapshot_id)
             quota_messages = [event[3] for event in events if event[1] == "quota_change"]
             self.assertTrue(quota_messages)
-            self.assertIn("Weekly remaining: 68%", quota_messages[0])
+            self.assertIn("Weekly remaining: 69% -> 68% (-1 pp)", quota_messages[0])
             self.assertIn("Weekly reset: 08-08-26 09:59", quota_messages[0])
             self.assertIn("Usage limit resets available: 1", quota_messages[0])
             self.assertNotIn("Weekly used", quota_messages[0])
+
+    def test_four_weekly_remaining_changes_still_send_four_notifications(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_cfg(tmp)
+            monitor.init_db(cfg)
+            sent_messages: list[tuple[str, str]] = []
+            with monitor.connect_db(cfg) as con, mock.patch.object(
+                monitor,
+                "send_telegram",
+                side_effect=lambda _cfg, title, message: sent_messages.append((title, message)) or "sent",
+            ):
+                run_id = monitor.start_run(con)
+                older_id = self.insert_reading(con, run_id, 11, 90, "2026-08-12T10:06:00Z", 0)
+                self.insert_sent_quota_notification(con, older_id)
+                for remaining in (89, 88, 87, 86):
+                    snapshot_id = self.insert_reading(con, run_id, 11, remaining, "2026-08-12T10:06:00Z", 0)
+                    monitor.dispatch_notifications(cfg, con, snapshot_id)
+            self.assertEqual(len(sent_messages), 4)
+            self.assertTrue(all(message.startswith("Weekly remaining:") for _title, message in sent_messages))
 
     def test_repeated_dispatch_of_same_new_state_sends_at_most_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

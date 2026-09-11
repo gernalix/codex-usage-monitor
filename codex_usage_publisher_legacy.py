@@ -550,21 +550,23 @@ def export_repo(repo: Path, cycles: list[dict[str, Any]], chat_events_by_id: dic
 
 
 def send_batch_telegram(cycles: list[dict[str, Any]], dry_run: bool) -> bool:
-    grouped: dict[int, list[str]] = {}
+    missing_by_chat: dict[int, list[str]] = {}
     for cycle in cycles:
-        pid = cycle["metrics"].get("prompt_id") or f"senza PROMPT_ID:{cycle['metrics']['cycle_key']}"
-        grouped.setdefault(int(cycle["metrics"]["chat_id"]), []).append(str(pid))
-    prompt_ids = [c["metrics"].get("prompt_id") for c in cycles if c["metrics"].get("prompt_id")]
-    if len(cycles) > 5 or len(grouped) > 2:
-        message = f"Pushati {len(cycles)} cicli final-response in {len(grouped)} chat; prompt_id trovati: {len(prompt_ids)}"
-    elif len(grouped) == 1:
-        chat_id, prompt_ids = next(iter(grouped.items()))
-        if len(prompt_ids) == 1:
-            message = f"Pushato prompt {prompt_ids[0]} di chat {chat_id}"
-        else:
-            message = f"Pushati prompt {', '.join(prompt_ids)} di chat {chat_id}"
+        if cycle["metrics"].get("prompt_id"):
+            continue
+        missing_by_chat.setdefault(int(cycle["metrics"]["chat_id"]), []).append(str(cycle["metrics"]["cycle_key"]))
+    if not missing_by_chat:
+        return True
+    if len(missing_by_chat) == 1:
+        chat_id, cycle_keys = next(iter(missing_by_chat.items()))
+        first_key = cycle_keys[0]
+        last_key = cycle_keys[-1]
+        message = (
+            f"Anomalia Codex usage: {len(cycle_keys)} cicli final-response senza PROMPT_ID nella chat {chat_id}.\n"
+            f"Primo ciclo: {first_key}\nUltimo ciclo: {last_key}"
+        )
     else:
-        message = "; ".join(f"chat {chat}: prompt {', '.join(ids)}" for chat, ids in sorted(grouped.items()))
+        message = "; ".join(f"chat {chat}: {len(keys)} cicli senza PROMPT_ID" for chat, keys in sorted(missing_by_chat.items()))
     if dry_run:
         print(json.dumps({"telegram": "dry_run", "message": message}, sort_keys=True))
         return True
