@@ -4,9 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path
-import py_compile
 import shutil
 import subprocess
 import tempfile
@@ -82,7 +80,7 @@ def compile_release(release: Path) -> None:
         try:
             compile(path.read_text(encoding="utf-8"), str(path), "exec")
         except SyntaxError as exc:
-            raise py_compile.PyCompileError(exc, dfile=str(path)) from exc
+            raise DeployError(f"syntax error in runtime file {name}: {exc.msg}") from exc
 
 
 def write_manifest(release: Path, *, commit: str, source: Path, hashes: dict[str, str]) -> None:
@@ -161,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         result = deploy(Path(args.source), Path(args.runtime_root).expanduser())
-    except (DeployError, py_compile.PyCompileError) as exc:
+    except DeployError as exc:
         print(json.dumps({"status": "error", "error": str(exc)}, sort_keys=True))
         return 75
     print(json.dumps({"status": "deployed", **result}, sort_keys=True))
