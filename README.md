@@ -10,6 +10,10 @@ the existing Datasette service expose the database and views from
 Persistent application state lives only in SQLite. Notifications use the
 existing `/home/ubuntu/telegram_notify.py` helper.
 
+> GitHub repository autosync is owned by the separate
+> `gernalix/github-autosync` repository. Do not add its script or systemd units
+> back to this repository.
+
 ## Runtime
 
 Default database:
