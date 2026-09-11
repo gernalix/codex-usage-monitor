@@ -12,7 +12,7 @@ import codex_usage_publisher_legacy as legacy
 from codex_usage_publisher_legacy import *  # noqa: F401,F403
 
 
-VERSION = "2026.09.07"
+VERSION = "2026.09.11"
 FINGERPRINT_SCHEMA = 2
 GUARD_METADATA_KEYS = {"repo_project", "repo_paths", "repo_projects", "repo_write_projects", "repo_path_kinds"}
 _GOAL_PREFIX = '<codex_internal_context source="goal">'
@@ -302,6 +302,47 @@ def _write_paths_from_payload(payload: dict[str, Any]) -> list[str]:
     return _explicit_paths_from_payload(payload)
 
 
+def _command_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return " ".join(str(item) for item in value)
+    return ""
+
+
+def _exec_command_is_mutating(command: Any) -> bool:
+    text = _command_text(command)
+    if not text:
+        return False
+    patterns = (
+        r"(?im)(?:^|[;&|]\s*)git\s+(?:add|commit|rm|mv|reset|checkout|switch|merge|rebase|cherry-pick|revert|stash|clean)\b",
+        r"(?im)(?:^|[;&|]\s*)(?:rm|mv|cp|touch|mkdir|rmdir|truncate|install|tee)\b",
+        r"(?im)\bsed\b[^\n;]*\s-i(?:\s|$|[^\w])",
+        r"(?im)\bperl\b[^\n;]*\s-(?:pi|ip)\b",
+        r"(?im)\bdd\b[^\n;]*\bof=",
+        r"(?m)(?:^|[^<])(?:>>|>)\s*[^>&]",
+        r"\.write_(?:text|bytes)\s*\(",
+        r"\bopen\s*\([^\n,]+,\s*['\"][wa+]",
+        r"\bshutil\.(?:copy|copy2|copyfile|move|rmtree)\s*\(",
+        r"\bos\.(?:remove|unlink|rename|replace|mkdir|makedirs|rmdir)\s*\(",
+    )
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _exec_write_paths_from_event(event: dict[str, Any]) -> list[str]:
+    if event.get("tool_name") not in {"exec_command", "shell"}:
+        return []
+    args = _json_obj(event.get("content_text"))
+    if not _exec_command_is_mutating(args.get("cmd")):
+        return []
+    paths: list[str] = []
+    for key in ("workdir", "cwd"):
+        value = args.get(key)
+        if isinstance(value, str) and value.startswith("/"):
+            paths.append(value)
+    return paths
+
+
 def _fingerprint(cycle: dict[str, Any]) -> str:
     metrics = {key: value for key, value in cycle["metrics"].items() if key not in GUARD_METADATA_KEYS}
     payload = {"metrics": metrics, "events": cycle["events"]}
@@ -322,7 +363,12 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
     for cycle in cycles:
         metrics = cycle["metrics"]
         explicit_repos = [str(repo) for repo in _repo_roots(list(metrics.get("repo_paths") or []))]
-        write_repos = [str(repo) for repo in _repo_roots(list(metrics.get("repo_write_paths") or []))]
+        exec_write_paths: list[str] = []
+        for event in cycle.get("events") or []:
+            if isinstance(event, dict):
+                exec_write_paths.extend(_exec_write_paths_from_event(event))
+        write_paths = list(metrics.get("repo_write_paths") or []) + exec_write_paths
+        write_repos = [str(repo) for repo in _repo_roots(write_paths)]
         if explicit_repos:
             metrics["repo_projects"] = explicit_repos
         else:
