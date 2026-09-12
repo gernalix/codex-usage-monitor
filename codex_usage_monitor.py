@@ -1297,6 +1297,21 @@ def quota_state_from_message(message: str) -> dict[str, str] | None:
     return values if required <= values.keys() else None
 
 
+def quota_change_is_noop(previous_state: dict[str, str], current_state: dict[str, str]) -> bool:
+    try:
+        previous_remaining = float(previous_state["weekly_remaining"])
+        current_remaining = float(current_state["weekly_remaining"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if previous_remaining != 100.0 or current_remaining != 100.0:
+        return False
+    comparable_previous = dict(previous_state)
+    comparable_current = dict(current_state)
+    comparable_previous.pop("weekly_reset", None)
+    comparable_current.pop("weekly_reset", None)
+    return comparable_previous == comparable_current
+
+
 def last_notified_quota_state(con: sqlite3.Connection) -> dict[str, str] | None:
     row = con.execute(
         """
@@ -1331,7 +1346,7 @@ def build_notification_events(cfg: Config, con: sqlite3.Connection, snapshot_id:
     if previous:
         current_state = quota_notification_state(current)
         previous_state = last_notified_quota_state(con) or quota_notification_state(previous)
-        if previous_state != current_state:
+        if previous_state != current_state and not quota_change_is_noop(previous_state, current_state):
             events.append(
                 (
                     quota_state_event_key(current_state),

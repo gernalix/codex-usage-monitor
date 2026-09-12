@@ -177,6 +177,93 @@ class ResetCountParsingTests(unittest.TestCase):
             quota_messages = [event[3] for event in events if event[1] == "quota_change"]
             self.assertEqual(len(quota_messages), 1)
 
+    def test_full_weekly_quota_reset_timestamp_slides_do_not_notify(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_cfg(tmp)
+            monitor.init_db(cfg)
+            sent_messages: list[tuple[str, str]] = []
+            with monitor.connect_db(cfg) as con, mock.patch.object(
+                monitor,
+                "send_telegram",
+                side_effect=lambda _cfg, title, message: sent_messages.append((title, message)) or "sent",
+            ):
+                run_id = monitor.start_run(con)
+                older_id = self.insert_reading(con, run_id, 0, 100, "2026-08-12T10:06:00Z", 2)
+                self.insert_sent_quota_notification(con, older_id)
+
+                reset_b_id = self.insert_reading(con, run_id, 0, 100, "2026-08-12T11:06:00Z", 2)
+                monitor.dispatch_notifications(cfg, con, reset_b_id)
+
+                reset_c_id = self.insert_reading(con, run_id, 0, 100, "2026-08-12T12:06:00Z", 2)
+                monitor.dispatch_notifications(cfg, con, reset_c_id)
+
+            quota_messages = [message for title, message in sent_messages if title == "Codex weekly quota changed"]
+            self.assertEqual(quota_messages, [])
+
+    def test_first_real_consumption_from_full_weekly_quota_notifies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_cfg(tmp)
+            monitor.init_db(cfg)
+            sent_messages: list[tuple[str, str]] = []
+            with monitor.connect_db(cfg) as con, mock.patch.object(
+                monitor,
+                "send_telegram",
+                side_effect=lambda _cfg, title, message: sent_messages.append((title, message)) or "sent",
+            ):
+                run_id = monitor.start_run(con)
+                older_id = self.insert_reading(con, run_id, 0, 100, "2026-08-12T10:06:00Z", 2)
+                self.insert_sent_quota_notification(con, older_id)
+                snapshot_id = self.insert_reading(con, run_id, 1, 99, "2026-08-12T11:06:00Z", 2)
+                monitor.dispatch_notifications(cfg, con, snapshot_id)
+
+            quota_messages = [message for title, message in sent_messages if title == "Codex weekly quota changed"]
+            self.assertEqual(len(quota_messages), 1)
+            self.assertIn("Weekly remaining: 100% -> 99% (-1 pp)", quota_messages[0])
+
+    def test_first_real_consumption_from_full_weekly_quota_notifies_when_poll_skips_99(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_cfg(tmp)
+            monitor.init_db(cfg)
+            sent_messages: list[tuple[str, str]] = []
+            with monitor.connect_db(cfg) as con, mock.patch.object(
+                monitor,
+                "send_telegram",
+                side_effect=lambda _cfg, title, message: sent_messages.append((title, message)) or "sent",
+            ):
+                run_id = monitor.start_run(con)
+                older_id = self.insert_reading(con, run_id, 0, 100, "2026-08-12T10:06:00Z", 2)
+                self.insert_sent_quota_notification(con, older_id)
+                snapshot_id = self.insert_reading(con, run_id, 2, 98, "2026-08-12T11:06:00Z", 2)
+                monitor.dispatch_notifications(cfg, con, snapshot_id)
+
+            quota_messages = [message for title, message in sent_messages if title == "Codex weekly quota changed"]
+            self.assertEqual(len(quota_messages), 1)
+            self.assertIn("Weekly remaining: 100% -> 98% (-2 pp)", quota_messages[0])
+
+    def test_real_reset_to_full_weekly_quota_notifies_once_then_timestamp_slides_do_not_notify(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_cfg(tmp)
+            monitor.init_db(cfg)
+            sent_messages: list[tuple[str, str]] = []
+            with monitor.connect_db(cfg) as con, mock.patch.object(
+                monitor,
+                "send_telegram",
+                side_effect=lambda _cfg, title, message: sent_messages.append((title, message)) or "sent",
+            ):
+                run_id = monitor.start_run(con)
+                older_id = self.insert_reading(con, run_id, 11, 89, "2026-08-12T10:06:00Z", 2)
+                self.insert_sent_quota_notification(con, older_id)
+
+                reset_id = self.insert_reading(con, run_id, 0, 100, "2026-08-19T10:06:00Z", 2)
+                monitor.dispatch_notifications(cfg, con, reset_id)
+
+                reset_slide_id = self.insert_reading(con, run_id, 0, 100, "2026-08-19T11:06:00Z", 2)
+                monitor.dispatch_notifications(cfg, con, reset_slide_id)
+
+            quota_messages = [message for title, message in sent_messages if title == "Codex weekly quota changed"]
+            self.assertEqual(len(quota_messages), 1)
+            self.assertIn("Weekly remaining: 89% -> 100% (+11 pp)", quota_messages[0])
+
     def test_usage_limit_reset_count_change_notifies(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self.make_cfg(tmp)
