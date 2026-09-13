@@ -74,6 +74,14 @@ multiple `archive_id` records when a session was resumed. Normalized files apply
 best-effort secret redaction; raw copies are exact and stored with restrictive
 permissions.
 
+The timer's hot path is incremental. `codex_session_archive_incremental.py`
+compares the current size of each native rollout with `source_size_bytes` already
+stored in `archive.sqlite`. Codex rollout JSONL files are append-only, so an
+unchanged size means the file is not opened, copied or SHA256-hashed again. New
+or grown rollouts alone are passed to the canonical `import_session()` path,
+which retains snapshot + hash verification. The original
+`codex_session_archive.py import` remains the explicit full/fallback importer.
+
 ## Per-session and per-prompt cost metrics
 
 `codex_task_costs.py` is the canonical full rebuild from native Codex rollout
@@ -83,13 +91,15 @@ multiple roadmap prompts executed in the same Codex chat are measured
 separately. `PROMPT_ID` strings merely echoed by tools, files, or assistant
 output are not treated as prompt boundaries.
 
-The archive timer does **not** run that full rebuild every minute. After
-`codex_session_archive.py import`, `codex_task_costs_incremental.py` compares the
-archive index's already-computed `source_sha256`/size fingerprints with
+After the incremental archive pass, `codex_task_costs_incremental.py` compares
+the archive index's already-computed `source_sha256`/size fingerprints with
 `cost_source_state`. Only new or changed rollout files are parsed; when nothing
 changed, no rollout is reopened and the cost DB/CSVs are left untouched. The
 first run after introducing the incremental state performs one bootstrap full
 build. Removed archived sources remove only their own derived cost rows.
+
+Together these two stages avoid both former full scans: unchanged rollouts are
+not rehashed by the archive importer and are not reparsed by the cost indexer.
 
 Use the full derivation only when the whole index must intentionally be rebuilt:
 
@@ -106,7 +116,7 @@ python3 codex_prompt_cost_query.py --prompt-id 917364 --reasoning-effort low --l
 python3 codex_prompt_cost_query.py --prompt-id 284731 --json
 ```
 
-Normally the archive timer's incremental pass makes a just-finished prompt
+Normally the archive timer's incremental passes make a just-finished prompt
 available automatically. If an immediate lookup happens before that timer pass,
 use an explicit targeted refresh:
 
@@ -117,8 +127,10 @@ python3 codex_prompt_cost_query.py --prompt-id 835917 --refresh-prompt --latest 
 `--refresh-prompt` locates only native user-prompt boundaries for that ID and
 replaces only cost rows for matching rollout sources. With `--latest`, boundary
 timestamps select the genuinely newest execution and only that winning rollout
-is fully parsed. It does not rebuild unrelated `session_costs`. A prompt cannot
-know its own final cost while it is still running because its final native
+is fully parsed. It does not rebuild unrelated `session_costs`; when incremental
+source state is already initialized, the targeted refresh also updates that
+source fingerprint so the following timer pass does not parse it again. A prompt
+cannot know its own final cost while it is still running because its final native
 `token_count` and `task_complete` do not exist until completion.
 
 Outputs under `~/.local/share/codex-session-archive/index/`:
