@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import closing
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -95,6 +96,16 @@ def find_prompt_rollouts(source_root: Path, prompt_id: str, *, latest_only: bool
     return [path for _ts, path in matches]
 
 
+def source_fingerprint(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
+
+
 def refresh_prompt_costs(
     db_path: Path,
     source_root: Path,
@@ -111,9 +122,11 @@ def refresh_prompt_costs(
         raise RuntimeError(f"no native rollout contains PROMPT_ID={prompt_id} as a user prompt")
 
     refreshed: dict[str, list[dict[str, Any]]] = {}
+    fingerprints: dict[str, tuple[str, int]] = {}
     for path in candidates:
         _session, prompts = costs.analyze_with_prompts(path)
         refreshed[str(path)] = prompts
+        fingerprints[str(path)] = source_fingerprint(path)
 
     try:
         with closing(sqlite3.connect(db_path, timeout=10)) as con:
@@ -128,11 +141,26 @@ def refresh_prompt_costs(
                 raise RuntimeError(
                     "prompt_costs schema is stale (missing " + ", ".join(missing) + "); run codex_task_costs.py once"
                 )
+            state_ready = con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cost_source_state'"
+            ).fetchone() is not None
             sql = f"INSERT OR REPLACE INTO prompt_costs ({','.join(costs.PROMPT_KEYS)}) VALUES ({','.join('?' for _ in costs.PROMPT_KEYS)})"
             con.execute("BEGIN")
             for source_path, prompts in refreshed.items():
                 con.execute("DELETE FROM prompt_costs WHERE source_path = ?", (source_path,))
                 con.executemany(sql, [[row.get(key) for key in costs.PROMPT_KEYS] for row in prompts])
+                if state_ready:
+                    sha, size = fingerprints[source_path]
+                    con.execute(
+                        """
+                        INSERT INTO cost_source_state(source_path,source_sha256,source_size_bytes)
+                        VALUES (?,?,?)
+                        ON CONFLICT(source_path) DO UPDATE SET
+                            source_sha256=excluded.source_sha256,
+                            source_size_bytes=excluded.source_size_bytes
+                        """,
+                        (source_path, sha, size),
+                    )
             con.commit()
             con.row_factory = sqlite3.Row
             all_rows = [
