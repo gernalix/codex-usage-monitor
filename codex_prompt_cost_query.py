@@ -59,7 +59,7 @@ def query_prompt_costs(
         raise RuntimeError(f"cannot read cost database: {exc}") from exc
 
 
-def find_prompt_rollouts(source_root: Path, prompt_id: str) -> list[Path]:
+def find_prompt_rollouts(source_root: Path, prompt_id: str, *, latest_only: bool = False) -> list[Path]:
     """Locate rollouts where prompt_id occurs as a real native user-message boundary."""
     root = source_root.expanduser().resolve()
     if not root.is_dir():
@@ -81,15 +81,23 @@ def find_prompt_rollouts(source_root: Path, prompt_id: str) -> list[Path]:
                 if costs.prompt_id_from_user_message(obj.get("type"), payload.get("type"), payload) == prompt_id:
                     matches.append(path)
                     break
+        if latest_only and matches:
+            break
     return matches
 
 
-def refresh_prompt_costs(db_path: Path, source_root: Path, prompt_id: str) -> dict[str, int]:
+def refresh_prompt_costs(
+    db_path: Path,
+    source_root: Path,
+    prompt_id: str,
+    *,
+    latest_only: bool = False,
+) -> dict[str, int]:
     """Refresh only prompt_costs rows for rollout files that really contain prompt_id."""
     db_path = db_path.expanduser().resolve()
     if not db_path.is_file():
         raise RuntimeError(f"cost database not found: {db_path}; run codex_task_costs.py to rebuild it")
-    candidates = find_prompt_rollouts(source_root, prompt_id)
+    candidates = find_prompt_rollouts(source_root, prompt_id, latest_only=latest_only)
     if not candidates:
         raise RuntimeError(f"no native rollout contains PROMPT_ID={prompt_id} as a user prompt")
 
@@ -156,7 +164,12 @@ def main() -> int:
 
     try:
         if args.refresh_prompt:
-            result = refresh_prompt_costs(args.db, args.source_root, args.prompt_id)
+            result = refresh_prompt_costs(
+                args.db,
+                args.source_root,
+                args.prompt_id,
+                latest_only=args.latest,
+            )
             print(
                 f"targeted_refresh rollouts={result['rollouts_refreshed']} rows={result['prompt_rows_refreshed']}",
                 file=sys.stderr,
