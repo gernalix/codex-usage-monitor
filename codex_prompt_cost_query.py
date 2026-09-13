@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
@@ -42,7 +43,7 @@ def query_prompt_costs(
 
     uri = f"file:{db_path}?mode=ro"
     try:
-        with sqlite3.connect(uri, uri=True, timeout=5) as con:
+        with closing(sqlite3.connect(uri, uri=True, timeout=5)) as con:
             con.row_factory = sqlite3.Row
             exists = con.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='prompt_costs'"
