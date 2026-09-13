@@ -1,12 +1,39 @@
 from __future__ import annotations
 
 from contextlib import closing
+import json
 from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
 
 import codex_prompt_cost_query as query
+import codex_task_costs as costs
+
+
+def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+
+def token_event(ts: str, total: int, input_tokens: int, cached: int, output: int, reasoning: int) -> dict[str, object]:
+    return {
+        "timestamp": ts,
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "total_token_usage": {
+                    "input_tokens": input_tokens,
+                    "cached_input_tokens": cached,
+                    "output_tokens": output,
+                    "reasoning_output_tokens": reasoning,
+                    "total_tokens": total,
+                }
+            },
+            "rate_limits": {"primary": {"used_percent": 10.0, "resets_at": 1800000000}},
+        },
+    }
 
 
 class PromptCostQueryTests(unittest.TestCase):
@@ -72,6 +99,58 @@ class PromptCostQueryTests(unittest.TestCase):
             self.assertEqual(default[0]["total_tokens"], 200)
             self.assertEqual(including[0]["completion_state"], "eof_incomplete")
             self.assertEqual(including[0]["total_tokens"], 50)
+
+    def test_targeted_refresh_parses_only_real_matching_rollout_and_updates_prompt_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "archive"
+            source_root = base / "sessions"
+            costs.write_outputs([], [], root)
+            db = root / "index/task_costs.sqlite"
+
+            # Mentioning the ID in tool output must not make this a refresh candidate.
+            write_jsonl(
+                source_root / "unrelated.jsonl",
+                [
+                    {"timestamp": "2026-09-13T12:00:00Z", "type": "session_meta", "payload": {"session_id": "other"}},
+                    {"timestamp": "2026-09-13T12:00:01Z", "type": "response_item", "payload": {"type": "function_call_output", "output": "old PROMPT_ID=835917"}},
+                ],
+            )
+            target = source_root / "target.jsonl"
+            write_jsonl(
+                target,
+                [
+                    {"timestamp": "2026-09-13T13:00:00Z", "type": "session_meta", "payload": {"session_id": "target"}},
+                    {"timestamp": "2026-09-13T13:00:00.500Z", "type": "turn_context", "payload": {"model": "gpt-5.5", "collaboration_mode": {"settings": {"reasoning_effort": "low"}}}},
+                    token_event("2026-09-13T13:00:01Z", total=100, input_tokens=90, cached=80, output=10, reasoning=2),
+                    {
+                        "timestamp": "2026-09-13T13:00:02Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "PROMPT_ID=835917 validate"}],
+                        },
+                    },
+                    {"timestamp": "2026-09-13T13:00:03Z", "type": "response_item", "payload": {"type": "function_call", "name": "exec_command"}},
+                    token_event("2026-09-13T13:00:04Z", total=180, input_tokens=160, cached=130, output=20, reasoning=4),
+                    {"timestamp": "2026-09-13T13:00:05Z", "type": "event_msg", "payload": {"type": "task_complete"}},
+                ],
+            )
+
+            result = query.refresh_prompt_costs(db, source_root, "835917")
+            rows = query.query_prompt_costs(db, "835917", reasoning_effort="low", latest=True)
+
+            self.assertEqual(result["rollouts_refreshed"], 1)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["source_path"], str(target))
+            self.assertEqual(rows[0]["completion_state"], "task_complete")
+            self.assertEqual(rows[0]["total_tokens"], 80)
+            self.assertEqual(rows[0]["uncached_input_tokens"], 20)
+            self.assertEqual(rows[0]["tool_call_count"], 1)
+            self.assertIn("835917", (root / "index/prompt_costs.csv").read_text(encoding="utf-8"))
+            with closing(sqlite3.connect(db)) as con:
+                self.assertEqual(con.execute("SELECT count(*) FROM session_costs").fetchone()[0], 0)
 
     def test_missing_index_fails_with_rebuild_instruction(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
