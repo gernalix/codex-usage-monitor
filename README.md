@@ -74,28 +74,42 @@ multiple `archive_id` records when a session was resumed. Normalized files apply
 best-effort secret redaction; raw copies are exact and stored with restrictive
 permissions.
 
-## Per-session cost metrics
+## Per-session and per-prompt cost metrics
 
 `codex_task_costs.py` derives token and quota-cost metrics directly from native
 Codex rollout JSONL. The archive systemd service runs it automatically after
-each import.
+each import. Native `token_count` events are cumulative for the session; the
+script additionally derives deltas for each real `PROMPT_ID=` user message, so
+multiple roadmap prompts executed in the same Codex chat are measured
+separately. `PROMPT_ID` strings merely echoed by tools, files, or assistant
+output are not treated as prompt boundaries.
 
 ```bash
 python3 codex_task_costs.py
+python3 codex_task_costs.py --prompt-id 284731
+python3 codex_task_costs.py --prompt-id 284731 --json
 ```
 
 Outputs under `~/.local/share/codex-session-archive/index/`:
 
-- `task_costs.sqlite` — one `session_costs` row per Codex session.
-- `task_costs.csv` — convenient export of the same metrics.
+- `task_costs.sqlite` — `session_costs` plus exact derived `prompt_costs` rows.
+- `task_costs.csv` — convenient per-session export.
+- `prompt_costs.csv` — per-`PROMPT_ID` token/quota deltas.
 - SQLite view `expensive_sessions` — sessions ordered by total tokens.
-- SQLite view `model_reasoning_summary` — aggregate comparison by model and reasoning effort.
+- SQLite view `expensive_prompts` — prompt executions ordered by total tokens.
+- SQLite views `model_reasoning_summary` and `prompt_model_reasoning_summary` — aggregate comparisons by model/reasoning effort.
 
-Captured fields include model, reasoning effort, duration, turns, tool calls,
-reasoning items, PROMPT_IDs, input/cached/uncached/output/reasoning/total tokens,
-cache ratio, first/last weekly quota percentage and the observed quota delta
-inside the session. Quota delta is an observed session-window signal, not an
-exclusive attribution when multiple Codex sessions overlap.
+Captured fields include model, reasoning effort, duration, tool calls, reasoning
+items, input/cached/uncached/output/reasoning/total tokens, cache ratio,
+first/last weekly quota percentage and observed quota delta. Per-prompt token
+fields are deltas between the cumulative native token counter immediately before
+the prompt and the last counter observed before the next `PROMPT_ID` (or end of
+rollout). Quota delta remains an observed prompt/session-window signal, not an
+exclusive attribution when concurrent Codex sessions consume the same quota.
+
+A copied Codex UI/Markdown transcript does **not** include native `token_count`
+events, so exact token cost cannot be reconstructed from that transcript alone.
+Use the native archive metrics or the diagnostic bundle for exact analysis.
 
 ## Diagnostic usage bundle
 
@@ -111,9 +125,9 @@ Default output:
 `~/.local/share/codex-session-archive/exports/codex-usage-diagnostic-bundle-YYYYMMDDTHHMMSSZ.zip`
 
 The bundle contains `manifest.json`, a README, `task_costs.sqlite`,
-`task_costs.csv`, the archive index, redacted normalized session JSONL,
-per-session manifests, archive metadata, archive docs and any valid local
-quota/rate-limit monitor history. Raw rollout files, raw gzip archives, native
-Codex auth/state databases, shell snapshots, locks, temporary files and old
-backups are excluded. Missing optional sources are listed in `manifest.json`
-instead of failing the command.
+`task_costs.csv`, `prompt_costs.csv`, the archive index, redacted normalized
+session JSONL, per-session manifests, archive metadata, archive docs and any
+valid local quota/rate-limit monitor history. Raw rollout files, raw gzip
+archives, native Codex auth/state databases, shell snapshots, locks, temporary
+files and old backups are excluded. Missing optional sources are listed in
+`manifest.json` instead of failing the command.
