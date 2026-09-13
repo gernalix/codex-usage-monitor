@@ -106,12 +106,16 @@ first/last weekly quota percentage and observed quota delta. Per-prompt token
 fields are deltas between the cumulative native token counter immediately before
 the prompt and the last counter observed before native `task_complete`. The same
 `task_complete` event ends `duration_seconds`, so time spent idle before the next
-user prompt is excluded. Older/incomplete rollouts without `task_complete` fall
-back to the next prompt boundary or end of rollout. Repeated executions of the
-same `PROMPT_ID` remain separate rows; CLI filters such as `--model`,
-`--reasoning-effort` and `--latest` disambiguate them without inspecting raw
-rollouts. Quota delta remains an observed prompt/session-window signal, not an
-exclusive attribution when concurrent Codex sessions consume the same quota.
+user prompt is excluded. Older rollouts that omit `task_complete` but expose a
+following prompt are marked `next_prompt_fallback`; a prompt still active or
+abnormally terminated at EOF is marked `eof_incomplete`. Exact CLI queries
+exclude `eof_incomplete` rows by default; use `--include-incomplete` only for
+diagnostics. This prevents a prompt from reporting its own mid-run token
+snapshot as a final cost. Repeated executions of the same `PROMPT_ID` remain
+separate rows; CLI filters such as `--model`, `--reasoning-effort` and `--latest`
+disambiguate them without inspecting raw rollouts. Quota delta remains an
+observed prompt/session-window signal, not an exclusive attribution when
+concurrent Codex sessions consume the same quota.
 
 A copied Codex UI/Markdown transcript does **not** include native `token_count`
 events, so exact token cost cannot be reconstructed from that transcript alone.
