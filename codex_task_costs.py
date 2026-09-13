@@ -66,9 +66,17 @@ def usage_delta(end: dict[str, int], start: dict[str, int]) -> dict[str, int]:
 
 
 def prompt_id_from_user_message(top: Any, ptype: Any, payload: dict[str, Any]) -> str | None:
-    if top != "event_msg" or ptype != "user_message":
-        return None
-    message = payload.get("message")
+    message = None
+    if top == "event_msg" and ptype == "user_message":
+        message = payload.get("message")
+    elif top == "response_item" and ptype == "message" and payload.get("role") == "user":
+        parts = []
+        content = payload.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+        message = "\n".join(parts)
     if not isinstance(message, str):
         return None
     match = PROMPT_RE.search(message)

@@ -101,6 +101,32 @@ class TaskCostTests(unittest.TestCase):
             self.assertTrue((root / "index/prompt_costs.csv").exists())
             self.assertIn("284731", (root / "index/prompt_costs.csv").read_text(encoding="utf-8"))
 
+    def test_native_response_item_user_message_creates_prompt_cost(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout.jsonl"
+            write_jsonl(
+                path,
+                [
+                    {"timestamp": "2026-09-13T12:00:00Z", "type": "session_meta", "payload": {"session_id": "s1"}},
+                    {
+                        "timestamp": "2026-09-13T12:00:01Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "PROMPT_ID=917364 native"}],
+                        },
+                    },
+                    token_event("2026-09-13T12:00:02Z", input_tokens=10, cached=4, output=3, reasoning=1, total=13, quota=1.1),
+                ],
+            )
+
+            _, prompts = costs.analyze_with_prompts(path)
+
+            self.assertEqual(len(prompts), 1)
+            self.assertEqual(prompts[0]["prompt_id"], "917364")
+            self.assertEqual(prompts[0]["total_tokens"], 13)
+
 
 if __name__ == "__main__":
     unittest.main()
