@@ -84,7 +84,7 @@ multiple roadmap prompts executed in the same Codex chat are measured
 separately. `PROMPT_ID` strings merely echoed by tools, files, or assistant
 output are not treated as prompt boundaries.
 
-Use the full derivation only when the index must be refreshed:
+Use the full derivation only when the whole index must be rebuilt:
 
 ```bash
 python3 codex_task_costs.py
@@ -99,10 +99,21 @@ python3 codex_prompt_cost_query.py --prompt-id 917364 --reasoning-effort low --l
 python3 codex_prompt_cost_query.py --prompt-id 284731 --json
 ```
 
-If a just-finished prompt is not present yet, let the archive import complete or
-run `python3 codex_task_costs.py` once, then query again. A prompt cannot know its
-own final cost while it is still running because its final native `token_count`
-and `task_complete` do not exist until completion.
+If a just-finished prompt is not indexed yet, use an explicit targeted refresh:
+
+```bash
+python3 codex_prompt_cost_query.py --prompt-id 835917 --refresh-prompt --latest --json
+```
+
+`--refresh-prompt` first locates only rollout files where that ID appears as a
+real native user-prompt boundary, reparses those matching rollout files, and
+replaces only their `prompt_costs` rows. It does not rebuild unrelated
+`session_costs` or fully parse every rollout. `prompt_costs.csv` is regenerated
+from the small SQLite prompt index after that explicit refresh. Use full
+`codex_task_costs.py` only for a stale/incompatible schema or an intentional
+complete rebuild. A prompt cannot know its own final cost while it is still
+running because its final native `token_count` and `task_complete` do not exist
+until completion.
 
 Outputs under `~/.local/share/codex-session-archive/index/`:
 
