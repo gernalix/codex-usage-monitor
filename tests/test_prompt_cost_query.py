@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import closing
 import json
+import os
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -34,6 +35,27 @@ def token_event(ts: str, total: int, input_tokens: int, cached: int, output: int
             "rate_limits": {"primary": {"used_percent": 10.0, "resets_at": 1800000000}},
         },
     }
+
+
+def native_prompt_rows(prompt_id: str, *, session: str, hour: int, end_total: int) -> list[dict[str, object]]:
+    prefix = f"2026-09-13T{hour:02d}:00:"
+    return [
+        {"timestamp": prefix + "00Z", "type": "session_meta", "payload": {"session_id": session}},
+        {"timestamp": prefix + "00.500Z", "type": "turn_context", "payload": {"model": "gpt-5.5", "collaboration_mode": {"settings": {"reasoning_effort": "low"}}}},
+        token_event(prefix + "01Z", total=100, input_tokens=90, cached=80, output=10, reasoning=2),
+        {
+            "timestamp": prefix + "02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": f"PROMPT_ID={prompt_id} validate"}],
+            },
+        },
+        {"timestamp": prefix + "03Z", "type": "response_item", "payload": {"type": "function_call", "name": "exec_command"}},
+        token_event(prefix + "04Z", total=end_total, input_tokens=160, cached=130, output=20, reasoning=4),
+        {"timestamp": prefix + "05Z", "type": "event_msg", "payload": {"type": "task_complete"}},
+    ]
 
 
 class PromptCostQueryTests(unittest.TestCase):
@@ -100,7 +122,7 @@ class PromptCostQueryTests(unittest.TestCase):
             self.assertEqual(including[0]["completion_state"], "eof_incomplete")
             self.assertEqual(including[0]["total_tokens"], 50)
 
-    def test_targeted_refresh_parses_only_real_matching_rollout_and_updates_prompt_index(self) -> None:
+    def test_targeted_latest_refresh_stops_after_newest_real_matching_rollout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             root = base / "archive"
@@ -108,37 +130,23 @@ class PromptCostQueryTests(unittest.TestCase):
             costs.write_outputs([], [], root)
             db = root / "index/task_costs.sqlite"
 
-            # Mentioning the ID in tool output must not make this a refresh candidate.
-            write_jsonl(
-                source_root / "unrelated.jsonl",
-                [
-                    {"timestamp": "2026-09-13T12:00:00Z", "type": "session_meta", "payload": {"session_id": "other"}},
-                    {"timestamp": "2026-09-13T12:00:01Z", "type": "response_item", "payload": {"type": "function_call_output", "output": "old PROMPT_ID=835917"}},
-                ],
-            )
+            older = source_root / "older.jsonl"
+            write_jsonl(older, native_prompt_rows("835917", session="older", hour=12, end_total=150))
             target = source_root / "target.jsonl"
+            write_jsonl(target, native_prompt_rows("835917", session="target", hour=13, end_total=180))
+            unrelated = source_root / "unrelated.jsonl"
             write_jsonl(
-                target,
+                unrelated,
                 [
-                    {"timestamp": "2026-09-13T13:00:00Z", "type": "session_meta", "payload": {"session_id": "target"}},
-                    {"timestamp": "2026-09-13T13:00:00.500Z", "type": "turn_context", "payload": {"model": "gpt-5.5", "collaboration_mode": {"settings": {"reasoning_effort": "low"}}}},
-                    token_event("2026-09-13T13:00:01Z", total=100, input_tokens=90, cached=80, output=10, reasoning=2),
-                    {
-                        "timestamp": "2026-09-13T13:00:02Z",
-                        "type": "response_item",
-                        "payload": {
-                            "type": "message",
-                            "role": "user",
-                            "content": [{"type": "input_text", "text": "PROMPT_ID=835917 validate"}],
-                        },
-                    },
-                    {"timestamp": "2026-09-13T13:00:03Z", "type": "response_item", "payload": {"type": "function_call", "name": "exec_command"}},
-                    token_event("2026-09-13T13:00:04Z", total=180, input_tokens=160, cached=130, output=20, reasoning=4),
-                    {"timestamp": "2026-09-13T13:00:05Z", "type": "event_msg", "payload": {"type": "task_complete"}},
+                    {"timestamp": "2026-09-13T14:00:00Z", "type": "session_meta", "payload": {"session_id": "other"}},
+                    {"timestamp": "2026-09-13T14:00:01Z", "type": "response_item", "payload": {"type": "function_call_output", "output": "old PROMPT_ID=835917"}},
                 ],
             )
+            os.utime(older, ns=(1_000_000_000, 1_000_000_000))
+            os.utime(target, ns=(2_000_000_000, 2_000_000_000))
+            os.utime(unrelated, ns=(3_000_000_000, 3_000_000_000))
 
-            result = query.refresh_prompt_costs(db, source_root, "835917")
+            result = query.refresh_prompt_costs(db, source_root, "835917", latest_only=True)
             rows = query.query_prompt_costs(db, "835917", reasoning_effort="low", latest=True)
 
             self.assertEqual(result["rollouts_refreshed"], 1)
@@ -150,6 +158,7 @@ class PromptCostQueryTests(unittest.TestCase):
             self.assertEqual(rows[0]["tool_call_count"], 1)
             self.assertIn("835917", (root / "index/prompt_costs.csv").read_text(encoding="utf-8"))
             with closing(sqlite3.connect(db)) as con:
+                self.assertEqual(con.execute("SELECT count(*) FROM prompt_costs WHERE prompt_id='835917'").fetchone()[0], 1)
                 self.assertEqual(con.execute("SELECT count(*) FROM session_costs").fetchone()[0], 0)
 
     def test_missing_index_fails_with_rebuild_instruction(self) -> None:
