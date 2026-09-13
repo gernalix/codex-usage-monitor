@@ -87,6 +87,7 @@ output are not treated as prompt boundaries.
 ```bash
 python3 codex_task_costs.py
 python3 codex_task_costs.py --prompt-id 284731
+python3 codex_task_costs.py --prompt-id 917364 --reasoning-effort low --latest
 python3 codex_task_costs.py --prompt-id 284731 --json
 ```
 
@@ -99,12 +100,17 @@ Outputs under `~/.local/share/codex-session-archive/index/`:
 - SQLite view `expensive_prompts` — prompt executions ordered by total tokens.
 - SQLite views `model_reasoning_summary` and `prompt_model_reasoning_summary` — aggregate comparisons by model/reasoning effort.
 
-Captured fields include model, reasoning effort, duration, tool calls, reasoning
-items, input/cached/uncached/output/reasoning/total tokens, cache ratio,
+Captured fields include model, reasoning effort, active duration, tool calls,
+reasoning items, input/cached/uncached/output/reasoning/total tokens, cache ratio,
 first/last weekly quota percentage and observed quota delta. Per-prompt token
 fields are deltas between the cumulative native token counter immediately before
-the prompt and the last counter observed before the next `PROMPT_ID` (or end of
-rollout). Quota delta remains an observed prompt/session-window signal, not an
+the prompt and the last counter observed before native `task_complete`. The same
+`task_complete` event ends `duration_seconds`, so time spent idle before the next
+user prompt is excluded. Older/incomplete rollouts without `task_complete` fall
+back to the next prompt boundary or end of rollout. Repeated executions of the
+same `PROMPT_ID` remain separate rows; CLI filters such as `--model`,
+`--reasoning-effort` and `--latest` disambiguate them without inspecting raw
+rollouts. Quota delta remains an observed prompt/session-window signal, not an
 exclusive attribution when concurrent Codex sessions consume the same quota.
 
 A copied Codex UI/Markdown transcript does **not** include native `token_count`
