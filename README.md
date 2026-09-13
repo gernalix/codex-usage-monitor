@@ -76,15 +76,22 @@ permissions.
 
 ## Per-session and per-prompt cost metrics
 
-`codex_task_costs.py` derives token and quota-cost metrics directly from native
-Codex rollout JSONL. The archive systemd service runs it automatically after
-each import. Native `token_count` events are cumulative for the session; the
-script additionally derives deltas for each real `PROMPT_ID=` user message, so
+`codex_task_costs.py` is the canonical full rebuild from native Codex rollout
+JSONL. Native `token_count` events are cumulative for the session; the derived
+`prompt_costs` rows are deltas for each real `PROMPT_ID=` user message, so
 multiple roadmap prompts executed in the same Codex chat are measured
 separately. `PROMPT_ID` strings merely echoed by tools, files, or assistant
 output are not treated as prompt boundaries.
 
-Use the full derivation only when the whole index must be rebuilt:
+The archive timer does **not** run that full rebuild every minute. After
+`codex_session_archive.py import`, `codex_task_costs_incremental.py` compares the
+archive index's already-computed `source_sha256`/size fingerprints with
+`cost_source_state`. Only new or changed rollout files are parsed; when nothing
+changed, no rollout is reopened and the cost DB/CSVs are left untouched. The
+first run after introducing the incremental state performs one bootstrap full
+build. Removed archived sources remove only their own derived cost rows.
+
+Use the full derivation only when the whole index must intentionally be rebuilt:
 
 ```bash
 python3 codex_task_costs.py
@@ -99,25 +106,24 @@ python3 codex_prompt_cost_query.py --prompt-id 917364 --reasoning-effort low --l
 python3 codex_prompt_cost_query.py --prompt-id 284731 --json
 ```
 
-If a just-finished prompt is not indexed yet, use an explicit targeted refresh:
+Normally the archive timer's incremental pass makes a just-finished prompt
+available automatically. If an immediate lookup happens before that timer pass,
+use an explicit targeted refresh:
 
 ```bash
 python3 codex_prompt_cost_query.py --prompt-id 835917 --refresh-prompt --latest --json
 ```
 
-`--refresh-prompt` first locates only rollout files where that ID appears as a
-real native user-prompt boundary, reparses those matching rollout files, and
-replaces only their `prompt_costs` rows. It does not rebuild unrelated
-`session_costs` or fully parse every rollout. `prompt_costs.csv` is regenerated
-from the small SQLite prompt index after that explicit refresh. Use full
-`codex_task_costs.py` only for a stale/incompatible schema or an intentional
-complete rebuild. A prompt cannot know its own final cost while it is still
-running because its final native `token_count` and `task_complete` do not exist
-until completion.
+`--refresh-prompt` locates only native user-prompt boundaries for that ID and
+replaces only cost rows for matching rollout sources. With `--latest`, boundary
+timestamps select the genuinely newest execution and only that winning rollout
+is fully parsed. It does not rebuild unrelated `session_costs`. A prompt cannot
+know its own final cost while it is still running because its final native
+`token_count` and `task_complete` do not exist until completion.
 
 Outputs under `~/.local/share/codex-session-archive/index/`:
 
-- `task_costs.sqlite` — `session_costs` plus exact derived `prompt_costs` rows.
+- `task_costs.sqlite` — `session_costs`, exact derived `prompt_costs`, and incremental source fingerprints.
 - `task_costs.csv` — convenient per-session export.
 - `prompt_costs.csv` — per-`PROMPT_ID` token/quota deltas.
 - SQLite view `expensive_sessions` — sessions ordered by total tokens.
