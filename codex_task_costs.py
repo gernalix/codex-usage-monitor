@@ -28,11 +28,11 @@ SESSION_KEYS = [
     "quota_used_percent_last", "quota_delta_points", "quota_resets_at",
 ]
 PROMPT_KEYS = [
-    "session_id", "source_path", "prompt_seq", "prompt_id", "first_timestamp_utc", "last_timestamp_utc",
-    "duration_seconds", "cwd", "model", "reasoning_effort", "tool_call_count", "reasoning_item_count",
-    "input_tokens", "cached_input_tokens", "uncached_input_tokens", "output_tokens", "reasoning_output_tokens",
-    "total_tokens", "cached_input_ratio", "quota_used_percent_first", "quota_used_percent_last",
-    "quota_delta_points", "quota_resets_at",
+    "session_id", "source_path", "prompt_seq", "prompt_id", "completion_state",
+    "first_timestamp_utc", "last_timestamp_utc", "duration_seconds", "cwd", "model", "reasoning_effort",
+    "tool_call_count", "reasoning_item_count", "input_tokens", "cached_input_tokens", "uncached_input_tokens",
+    "output_tokens", "reasoning_output_tokens", "total_tokens", "cached_input_ratio",
+    "quota_used_percent_first", "quota_used_percent_last", "quota_delta_points", "quota_resets_at",
 ]
 
 
@@ -121,6 +121,7 @@ def finalize_prompt(active: dict[str, Any], session_id: str, source_path: str) -
         "source_path": source_path,
         "prompt_seq": active["prompt_seq"],
         "prompt_id": active["prompt_id"],
+        "completion_state": active.get("completion_state", "eof_incomplete"),
         "first_timestamp_utc": iso(start_ts),
         "last_timestamp_utc": iso(end_ts),
         "duration_seconds": (end_ts - start_ts).total_seconds() if start_ts and end_ts else None,
@@ -192,8 +193,10 @@ def analyze_with_prompts(path: Path) -> tuple[dict[str, Any], list[dict[str, Any
 
             prompt_id = prompt_id_from_user_message(top, ptype, payload)
             if prompt_id is not None:
-                # Fallback for incomplete/older rollouts without task_complete.
+                # Fallback for older rollouts that start a new prompt without an
+                # exposed task_complete for the previous one.
                 if active is not None:
+                    active["completion_state"] = "next_prompt_fallback"
                     prompt_rows.append(finalize_prompt(active, session_id, str(path)))
                 prompt_seq += 1
                 if prompt_id not in prompt_id_seen:
@@ -202,6 +205,7 @@ def analyze_with_prompts(path: Path) -> tuple[dict[str, Any], list[dict[str, Any
                 active = {
                     "prompt_seq": prompt_seq,
                     "prompt_id": prompt_id,
+                    "completion_state": "eof_incomplete",
                     "start_ts": ts,
                     "last_ts": ts,
                     "cwd": cwd,
@@ -248,14 +252,17 @@ def analyze_with_prompts(path: Path) -> tuple[dict[str, Any], list[dict[str, Any
                         active["quota_resets_at"] = q_reset or active.get("quota_resets_at")
 
             # Native task_complete is the authoritative end of active work. This
-            # excludes idle time until the user submits another prompt while
-            # preserving token deltas from the last token_count before completion.
+            # excludes idle time until the next prompt and prevents a completed
+            # row from being confused with a mid-run snapshot.
             if top == "event_msg" and ptype == "task_complete" and active is not None:
+                active["completion_state"] = "task_complete"
                 prompt_rows.append(finalize_prompt(active, session_id, str(path)))
                 active = None
 
-    # Incomplete/abnormally terminated rollouts may not expose task_complete.
+    # A running/abnormally terminated prompt is retained for diagnostics but is
+    # explicitly marked incomplete; exact-query helpers exclude it by default.
     if active is not None:
+        active["completion_state"] = "eof_incomplete"
         prompt_rows.append(finalize_prompt(active, session_id, str(path)))
 
     duration = (last_ts - first_ts).total_seconds() if first_ts and last_ts else None
@@ -300,8 +307,11 @@ def select_prompt_rows(
     model: str | None = None,
     reasoning_effort: str | None = None,
     latest: bool = False,
+    include_incomplete: bool = False,
 ) -> list[dict[str, Any]]:
     matches = [row for row in rows if row["prompt_id"] == prompt_id]
+    if not include_incomplete:
+        matches = [row for row in matches if row.get("completion_state") != "eof_incomplete"]
     if model is not None:
         matches = [row for row in matches if row.get("model") == model]
     if reasoning_effort is not None:
@@ -336,6 +346,7 @@ def write_outputs(rows: list[dict[str, Any]], prompt_rows: list[dict[str, Any]],
     CREATE INDEX IF NOT EXISTS idx_costs_model ON session_costs(model, reasoning_effort);
     CREATE TABLE IF NOT EXISTS prompt_costs (
       session_id TEXT NOT NULL, source_path TEXT NOT NULL, prompt_seq INTEGER NOT NULL, prompt_id TEXT NOT NULL,
+      completion_state TEXT,
       first_timestamp_utc TEXT, last_timestamp_utc TEXT, duration_seconds REAL,
       cwd TEXT, model TEXT, reasoning_effort TEXT, tool_call_count INTEGER, reasoning_item_count INTEGER,
       input_tokens INTEGER, cached_input_tokens INTEGER, uncached_input_tokens INTEGER,
@@ -364,6 +375,9 @@ def write_outputs(rows: list[dict[str, Any]], prompt_rows: list[dict[str, Any]],
     """
     with sqlite3.connect(db) as con:
         con.executescript(schema)
+        columns = {row[1] for row in con.execute("PRAGMA table_info(prompt_costs)")}
+        if "completion_state" not in columns:
+            con.execute("ALTER TABLE prompt_costs ADD COLUMN completion_state TEXT")
         con.execute("DELETE FROM prompt_costs")
         session_sql = f"INSERT OR REPLACE INTO session_costs ({','.join(SESSION_KEYS)}) VALUES ({','.join('?' for _ in SESSION_KEYS)})"
         prompt_sql = f"INSERT OR REPLACE INTO prompt_costs ({','.join(PROMPT_KEYS)}) VALUES ({','.join('?' for _ in PROMPT_KEYS)})"
@@ -378,14 +392,15 @@ def main() -> int:
     p = argparse.ArgumentParser(description="Derive per-session and per-PROMPT_ID Codex token/quota cost metrics from native rollouts.")
     p.add_argument("--source-root", type=Path, default=DEFAULT_SOURCE_ROOT)
     p.add_argument("--archive-root", type=Path, default=DEFAULT_ARCHIVE_ROOT)
-    p.add_argument("--prompt-id", help="print exact per-prompt rows for this PROMPT_ID after rebuilding metrics")
+    p.add_argument("--prompt-id", help="print exact completed per-prompt rows for this PROMPT_ID after rebuilding metrics")
     p.add_argument("--model", help="filter --prompt-id matches by exact model")
     p.add_argument("--reasoning-effort", help="filter --prompt-id matches by reasoning effort")
     p.add_argument("--latest", action="store_true", help="with --prompt-id, return only the latest matching execution")
+    p.add_argument("--include-incomplete", action="store_true", help="include EOF-incomplete rows in --prompt-id results")
     p.add_argument("--json", action="store_true", help="emit matching --prompt-id rows as JSON")
     args = p.parse_args()
-    if (args.model or args.reasoning_effort or args.latest) and not args.prompt_id:
-        p.error("--model, --reasoning-effort and --latest require --prompt-id")
+    if (args.model or args.reasoning_effort or args.latest or args.include_incomplete) and not args.prompt_id:
+        p.error("--model, --reasoning-effort, --latest and --include-incomplete require --prompt-id")
 
     rows: list[dict[str, Any]] = []
     prompt_rows: list[dict[str, Any]] = []
@@ -402,17 +417,19 @@ def main() -> int:
             model=args.model,
             reasoning_effort=args.reasoning_effort,
             latest=args.latest,
+            include_incomplete=args.include_incomplete,
         )
         if args.json:
             print(json.dumps(matches, ensure_ascii=False, sort_keys=True))
         else:
             for row in matches:
                 print(
-                    f"PROMPT_ID={row['prompt_id']} model={row['model']} reasoning={row['reasoning_effort']} "
-                    f"total={row['total_tokens']} input={row['input_tokens']} cached={row['cached_input_tokens']} "
-                    f"uncached={row['uncached_input_tokens']} output={row['output_tokens']} "
-                    f"reasoning_tokens={row['reasoning_output_tokens']} tools={row['tool_call_count']} "
-                    f"duration={row['duration_seconds']}s started={row['first_timestamp_utc']}"
+                    f"PROMPT_ID={row['prompt_id']} state={row['completion_state']} model={row['model']} "
+                    f"reasoning={row['reasoning_effort']} total={row['total_tokens']} input={row['input_tokens']} "
+                    f"cached={row['cached_input_tokens']} uncached={row['uncached_input_tokens']} "
+                    f"output={row['output_tokens']} reasoning_tokens={row['reasoning_output_tokens']} "
+                    f"tools={row['tool_call_count']} duration={row['duration_seconds']}s "
+                    f"started={row['first_timestamp_utc']}"
                 )
         return 0 if matches else 1
 
