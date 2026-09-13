@@ -74,7 +74,11 @@ def prompt_id_from_user_message(top: Any, ptype: Any, payload: dict[str, Any]) -
         content = payload.get("content")
         if isinstance(content, list):
             for item in content:
-                if isinstance(item, dict) and isinstance(item.get("text"), str):
+                if (
+                    isinstance(item, dict)
+                    and item.get("type") == "input_text"
+                    and isinstance(item.get("text"), str)
+                ):
                     parts.append(item["text"])
         message = "\n".join(parts)
     if not isinstance(message, str):
@@ -188,6 +192,7 @@ def analyze_with_prompts(path: Path) -> tuple[dict[str, Any], list[dict[str, Any
 
             prompt_id = prompt_id_from_user_message(top, ptype, payload)
             if prompt_id is not None:
+                # Fallback for incomplete/older rollouts without task_complete.
                 if active is not None:
                     prompt_rows.append(finalize_prompt(active, session_id, str(path)))
                 prompt_seq += 1
@@ -242,6 +247,14 @@ def analyze_with_prompts(path: Path) -> tuple[dict[str, Any], list[dict[str, Any
                         active["last_quota"] = q
                         active["quota_resets_at"] = q_reset or active.get("quota_resets_at")
 
+            # Native task_complete is the authoritative end of active work. This
+            # excludes idle time until the user submits another prompt while
+            # preserving token deltas from the last token_count before completion.
+            if top == "event_msg" and ptype == "task_complete" and active is not None:
+                prompt_rows.append(finalize_prompt(active, session_id, str(path)))
+                active = None
+
+    # Incomplete/abnormally terminated rollouts may not expose task_complete.
     if active is not None:
         prompt_rows.append(finalize_prompt(active, session_id, str(path)))
 
@@ -278,6 +291,23 @@ def analyze_with_prompts(path: Path) -> tuple[dict[str, Any], list[dict[str, Any
 
 def analyze(path: Path) -> dict[str, Any]:
     return analyze_with_prompts(path)[0]
+
+
+def select_prompt_rows(
+    rows: list[dict[str, Any]],
+    prompt_id: str,
+    *,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    latest: bool = False,
+) -> list[dict[str, Any]]:
+    matches = [row for row in rows if row["prompt_id"] == prompt_id]
+    if model is not None:
+        matches = [row for row in matches if row.get("model") == model]
+    if reasoning_effort is not None:
+        matches = [row for row in matches if row.get("reasoning_effort") == reasoning_effort]
+    matches.sort(key=lambda row: (row.get("first_timestamp_utc") or "", row.get("source_path") or "", row.get("prompt_seq") or 0))
+    return matches[-1:] if latest and matches else matches
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]], keys: list[str]) -> None:
@@ -349,8 +379,13 @@ def main() -> int:
     p.add_argument("--source-root", type=Path, default=DEFAULT_SOURCE_ROOT)
     p.add_argument("--archive-root", type=Path, default=DEFAULT_ARCHIVE_ROOT)
     p.add_argument("--prompt-id", help="print exact per-prompt rows for this PROMPT_ID after rebuilding metrics")
+    p.add_argument("--model", help="filter --prompt-id matches by exact model")
+    p.add_argument("--reasoning-effort", help="filter --prompt-id matches by reasoning effort")
+    p.add_argument("--latest", action="store_true", help="with --prompt-id, return only the latest matching execution")
     p.add_argument("--json", action="store_true", help="emit matching --prompt-id rows as JSON")
     args = p.parse_args()
+    if (args.model or args.reasoning_effort or args.latest) and not args.prompt_id:
+        p.error("--model, --reasoning-effort and --latest require --prompt-id")
 
     rows: list[dict[str, Any]] = []
     prompt_rows: list[dict[str, Any]] = []
@@ -361,16 +396,23 @@ def main() -> int:
     write_outputs(rows, prompt_rows, args.archive_root)
 
     if args.prompt_id:
-        matches = [row for row in prompt_rows if row["prompt_id"] == args.prompt_id]
+        matches = select_prompt_rows(
+            prompt_rows,
+            args.prompt_id,
+            model=args.model,
+            reasoning_effort=args.reasoning_effort,
+            latest=args.latest,
+        )
         if args.json:
             print(json.dumps(matches, ensure_ascii=False, sort_keys=True))
         else:
             for row in matches:
                 print(
-                    f"PROMPT_ID={row['prompt_id']} total={row['total_tokens']} input={row['input_tokens']} "
-                    f"cached={row['cached_input_tokens']} uncached={row['uncached_input_tokens']} "
-                    f"output={row['output_tokens']} reasoning={row['reasoning_output_tokens']} "
-                    f"tools={row['tool_call_count']} duration={row['duration_seconds']}s"
+                    f"PROMPT_ID={row['prompt_id']} model={row['model']} reasoning={row['reasoning_effort']} "
+                    f"total={row['total_tokens']} input={row['input_tokens']} cached={row['cached_input_tokens']} "
+                    f"uncached={row['uncached_input_tokens']} output={row['output_tokens']} "
+                    f"reasoning_tokens={row['reasoning_output_tokens']} tools={row['tool_call_count']} "
+                    f"duration={row['duration_seconds']}s started={row['first_timestamp_utc']}"
                 )
         return 0 if matches else 1
 
