@@ -47,6 +47,7 @@ class TaskCostTests(unittest.TestCase):
                 {"timestamp": "2026-09-13T12:00:04Z", "type": "response_item", "payload": {"type": "function_call_output", "output": "old PROMPT_ID=999 must not create a task"}},
                 token_event("2026-09-13T12:00:05Z", input_tokens=250, cached=150, output=50, reasoning=10, total=300, quota=10.2),
                 {"timestamp": "2026-09-13T12:00:06Z", "type": "event_msg", "payload": {"type": "task_complete"}},
+                # Deliberate idle gap: it must not inflate prompt 111 duration.
                 {"timestamp": "2026-09-13T12:01:00Z", "type": "event_msg", "payload": {"type": "user_message", "message": "PROMPT_ID=222 second"}},
                 {"timestamp": "2026-09-13T12:01:01Z", "type": "response_item", "payload": {"type": "reasoning", "summary": []}},
                 {"timestamp": "2026-09-13T12:01:02Z", "type": "response_item", "payload": {"type": "function_call", "name": "exec_command"}},
@@ -60,6 +61,7 @@ class TaskCostTests(unittest.TestCase):
             self.assertEqual(len(prompts), 2)
             first, second = prompts
             self.assertEqual(first["prompt_id"], "111")
+            self.assertEqual(first["duration_seconds"], 4.0)
             self.assertEqual(first["input_tokens"], 150)
             self.assertEqual(first["cached_input_tokens"], 110)
             self.assertEqual(first["uncached_input_tokens"], 40)
@@ -69,6 +71,7 @@ class TaskCostTests(unittest.TestCase):
             self.assertEqual(first["tool_call_count"], 1)
             self.assertAlmostEqual(first["quota_delta_points"], 0.2)
             self.assertEqual(second["prompt_id"], "222")
+            self.assertEqual(second["duration_seconds"], 3.0)
             self.assertEqual(second["input_tokens"], 250)
             self.assertEqual(second["cached_input_tokens"], 250)
             self.assertEqual(second["uncached_input_tokens"], 0)
@@ -114,7 +117,10 @@ class TaskCostTests(unittest.TestCase):
                         "payload": {
                             "type": "message",
                             "role": "user",
-                            "content": [{"type": "input_text", "text": "PROMPT_ID=917364 native"}],
+                            "content": [
+                                {"type": "output_text", "text": "PROMPT_ID=999 not user input"},
+                                {"type": "input_text", "text": "PROMPT_ID=917364 native"},
+                            ],
                         },
                     },
                     token_event("2026-09-13T12:00:02Z", input_tokens=10, cached=4, output=3, reasoning=1, total=13, quota=1.1),
@@ -126,6 +132,18 @@ class TaskCostTests(unittest.TestCase):
             self.assertEqual(len(prompts), 1)
             self.assertEqual(prompts[0]["prompt_id"], "917364")
             self.assertEqual(prompts[0]["total_tokens"], 13)
+
+    def test_prompt_selection_can_disambiguate_duplicate_prompt_ids(self) -> None:
+        rows = [
+            {"prompt_id": "917364", "model": "gpt-5.5", "reasoning_effort": "medium", "first_timestamp_utc": "2026-09-13T11:00:00Z", "source_path": "a", "prompt_seq": 1},
+            {"prompt_id": "917364", "model": "gpt-5.5", "reasoning_effort": "low", "first_timestamp_utc": "2026-09-13T12:00:00Z", "source_path": "b", "prompt_seq": 1},
+            {"prompt_id": "917364", "model": "gpt-5.5", "reasoning_effort": "low", "first_timestamp_utc": "2026-09-13T13:00:00Z", "source_path": "c", "prompt_seq": 2},
+        ]
+
+        selected = costs.select_prompt_rows(rows, "917364", reasoning_effort="low", latest=True)
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["source_path"], "c")
 
 
 if __name__ == "__main__":
