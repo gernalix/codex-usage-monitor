@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -10,7 +11,7 @@ import codex_prompt_cost_query as query
 
 class PromptCostQueryTests(unittest.TestCase):
     def make_db(self, path: Path) -> None:
-        with sqlite3.connect(path) as con:
+        with closing(sqlite3.connect(path)) as con:
             con.execute(
                 """
                 CREATE TABLE prompt_costs (
