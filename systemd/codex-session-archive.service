@@ -1,10 +1,10 @@
 [Unit]
-Description=Import native Codex sessions into AI-readable archive
+Description=Incrementally import native Codex sessions into AI-readable archive
 
 [Service]
 Type=oneshot
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/python3 /home/daniele/projects/codex-usage-monitor/codex_session_archive.py --archive-root /home/daniele/.local/share/codex-session-archive import
+ExecStart=/usr/bin/python3 /home/daniele/projects/codex-usage-monitor/codex_session_archive_incremental.py --archive-root /home/daniele/.local/share/codex-session-archive
 ExecStart=/usr/bin/python3 /home/daniele/projects/codex-usage-monitor/codex_task_costs_incremental.py --archive-root /home/daniele/.local/share/codex-session-archive
 ExecStart=/usr/bin/python3 /home/daniele/projects/codex-usage-monitor/codex_curated_vault.py --archive-root /home/daniele/.local/share/codex-session-archive
 TimeoutStartSec=300
