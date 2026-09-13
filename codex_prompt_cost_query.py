@@ -60,17 +60,19 @@ def query_prompt_costs(
 
 
 def find_prompt_rollouts(source_root: Path, prompt_id: str, *, latest_only: bool = False) -> list[Path]:
-    """Locate rollouts where prompt_id occurs as a real native user-message boundary."""
+    """Locate rollouts where prompt_id occurs as a real native user-message boundary.
+
+    For latest_only we still scan only the cheap prompt boundaries across files,
+    then choose by the native prompt timestamp. This avoids trusting filesystem
+    mtime while ensuring only the winning rollout is fully parsed afterwards.
+    """
     root = source_root.expanduser().resolve()
     if not root.is_dir():
         raise RuntimeError(f"native rollout root not found: {root}")
-    paths = sorted(
-        root.rglob("*.jsonl"),
-        key=lambda path: path.stat().st_mtime_ns,
-        reverse=True,
-    )
-    matches: list[Path] = []
-    for path in paths:
+
+    matches: list[tuple[str, Path]] = []
+    for path in root.rglob("*.jsonl"):
+        latest_prompt_ts: str | None = None
         with path.open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
                 try:
@@ -79,11 +81,16 @@ def find_prompt_rollouts(source_root: Path, prompt_id: str, *, latest_only: bool
                     continue
                 payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
                 if costs.prompt_id_from_user_message(obj.get("type"), payload.get("type"), payload) == prompt_id:
-                    matches.append(path)
-                    break
-        if latest_only and matches:
-            break
-    return matches
+                    ts = str(obj.get("timestamp") or "")
+                    if latest_prompt_ts is None or ts > latest_prompt_ts:
+                        latest_prompt_ts = ts
+        if latest_prompt_ts is not None:
+            matches.append((latest_prompt_ts, path))
+
+    matches.sort(key=lambda item: (item[0], str(item[1])))
+    if latest_only and matches:
+        return [matches[-1][1]]
+    return [path for _ts, path in matches]
 
 
 def refresh_prompt_costs(
