@@ -61,6 +61,7 @@ class TaskCostTests(unittest.TestCase):
             self.assertEqual(len(prompts), 2)
             first, second = prompts
             self.assertEqual(first["prompt_id"], "111")
+            self.assertEqual(first["completion_state"], "task_complete")
             self.assertEqual(first["duration_seconds"], 4.0)
             self.assertEqual(first["input_tokens"], 150)
             self.assertEqual(first["cached_input_tokens"], 110)
@@ -71,6 +72,7 @@ class TaskCostTests(unittest.TestCase):
             self.assertEqual(first["tool_call_count"], 1)
             self.assertAlmostEqual(first["quota_delta_points"], 0.2)
             self.assertEqual(second["prompt_id"], "222")
+            self.assertEqual(second["completion_state"], "eof_incomplete")
             self.assertEqual(second["duration_seconds"], 3.0)
             self.assertEqual(second["input_tokens"], 250)
             self.assertEqual(second["cached_input_tokens"], 250)
@@ -81,6 +83,8 @@ class TaskCostTests(unittest.TestCase):
             self.assertEqual(second["tool_call_count"], 1)
             self.assertEqual(second["reasoning_item_count"], 1)
             self.assertAlmostEqual(second["quota_delta_points"], 0.3)
+            self.assertEqual(costs.select_prompt_rows(prompts, "222"), [])
+            self.assertEqual(len(costs.select_prompt_rows(prompts, "222", include_incomplete=True)), 1)
 
     def test_write_outputs_persists_prompt_costs_and_csv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -99,8 +103,8 @@ class TaskCostTests(unittest.TestCase):
 
             db = root / "index/task_costs.sqlite"
             with sqlite3.connect(db) as con:
-                row = con.execute("SELECT prompt_id,total_tokens,uncached_input_tokens FROM prompt_costs").fetchone()
-            self.assertEqual(row, ("284731", 140, 23))
+                row = con.execute("SELECT prompt_id,completion_state,total_tokens,uncached_input_tokens FROM prompt_costs").fetchone()
+            self.assertEqual(row, ("284731", "eof_incomplete", 140, 23))
             self.assertTrue((root / "index/prompt_costs.csv").exists())
             self.assertIn("284731", (root / "index/prompt_costs.csv").read_text(encoding="utf-8"))
 
@@ -135,15 +139,23 @@ class TaskCostTests(unittest.TestCase):
 
     def test_prompt_selection_can_disambiguate_duplicate_prompt_ids(self) -> None:
         rows = [
-            {"prompt_id": "917364", "model": "gpt-5.5", "reasoning_effort": "medium", "first_timestamp_utc": "2026-09-13T11:00:00Z", "source_path": "a", "prompt_seq": 1},
-            {"prompt_id": "917364", "model": "gpt-5.5", "reasoning_effort": "low", "first_timestamp_utc": "2026-09-13T12:00:00Z", "source_path": "b", "prompt_seq": 1},
-            {"prompt_id": "917364", "model": "gpt-5.5", "reasoning_effort": "low", "first_timestamp_utc": "2026-09-13T13:00:00Z", "source_path": "c", "prompt_seq": 2},
+            {"prompt_id": "917364", "completion_state": "task_complete", "model": "gpt-5.5", "reasoning_effort": "medium", "first_timestamp_utc": "2026-09-13T11:00:00Z", "source_path": "a", "prompt_seq": 1},
+            {"prompt_id": "917364", "completion_state": "task_complete", "model": "gpt-5.5", "reasoning_effort": "low", "first_timestamp_utc": "2026-09-13T12:00:00Z", "source_path": "b", "prompt_seq": 1},
+            {"prompt_id": "917364", "completion_state": "eof_incomplete", "model": "gpt-5.5", "reasoning_effort": "low", "first_timestamp_utc": "2026-09-13T13:00:00Z", "source_path": "c", "prompt_seq": 2},
         ]
 
         selected = costs.select_prompt_rows(rows, "917364", reasoning_effort="low", latest=True)
+        selected_with_partial = costs.select_prompt_rows(
+            rows,
+            "917364",
+            reasoning_effort="low",
+            latest=True,
+            include_incomplete=True,
+        )
 
         self.assertEqual(len(selected), 1)
-        self.assertEqual(selected[0]["source_path"], "c")
+        self.assertEqual(selected[0]["source_path"], "b")
+        self.assertEqual(selected_with_partial[0]["source_path"], "c")
 
 
 if __name__ == "__main__":
