@@ -124,8 +124,8 @@ Default output:
 
 `~/.local/share/codex-session-archive/exports/codex-usage-diagnostic-bundle-YYYYMMDDTHHMMSSZ.zip`
 
-The bundle contains `manifest.json`, a README, `task_costs.sqlite`,
-`task_costs.csv`, `prompt_costs.csv`, the archive index, redacted normalized
+The bundle contains `manifest.json`, a README, `task_costs.sqlite` (including the
+`prompt_costs` table), `task_costs.csv`, the archive index, redacted normalized
 session JSONL, per-session manifests, archive metadata, archive docs and any
 valid local quota/rate-limit monitor history. Raw rollout files, raw gzip
 archives, native Codex auth/state databases, shell snapshots, locks, temporary
