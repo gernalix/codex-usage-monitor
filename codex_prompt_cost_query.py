@@ -62,9 +62,9 @@ def query_prompt_costs(
 def find_prompt_rollouts(source_root: Path, prompt_id: str, *, latest_only: bool = False) -> list[Path]:
     """Locate rollouts where prompt_id occurs as a real native user-message boundary.
 
-    For latest_only we still scan only the cheap prompt boundaries across files,
-    then choose by the native prompt timestamp. This avoids trusting filesystem
-    mtime while ensuring only the winning rollout is fully parsed afterwards.
+    A cheap raw-text prefilter avoids JSON-decoding unrelated rollout lines. For
+    latest_only all matching boundaries are compared by their native timestamp;
+    only the winning rollout is fully parsed afterwards.
     """
     root = source_root.expanduser().resolve()
     if not root.is_dir():
@@ -75,6 +75,8 @@ def find_prompt_rollouts(source_root: Path, prompt_id: str, *, latest_only: bool
         latest_prompt_ts: str | None = None
         with path.open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
+                if "PROMPT_ID" not in line or prompt_id not in line:
+                    continue
                 try:
                     obj = json.loads(line)
                 except (json.JSONDecodeError, TypeError):
