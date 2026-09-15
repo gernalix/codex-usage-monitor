@@ -18,6 +18,8 @@ DEFAULT_SOURCE_ROOT = Path.home() / ".codex/sessions"
 DEFAULT_STATE_DIR = publisher.DEFAULT_STATE_DIR
 DEFAULT_DATA_REPO = publisher.DEFAULT_DATA_REPO
 DEFAULT_DATA_REMOTE = publisher.DEFAULT_DATA_REMOTE
+MAX_CHUNK_OUTPUT_BYTES = 8 * 1024 * 1024
+MAX_SINGLE_RECORD_BYTES = 90 * 1024 * 1024
 
 
 def digest(text: str) -> str:
@@ -78,6 +80,7 @@ def append_chunk(source: Path, offset: int, target: Path) -> tuple[int, int]:
     fd, tmp = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
     count = 0
     end = offset
+    output_bytes = 0
     try:
         with source.open("rb") as inp, os.fdopen(fd, "w", encoding="utf-8") as out:
             inp.seek(offset)
@@ -86,7 +89,6 @@ def append_chunk(source: Path, offset: int, target: Path) -> tuple[int, int]:
                 raw = inp.readline()
                 if not raw or not raw.endswith(b"\n"):
                     break
-                end = inp.tell()
                 text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
                 try:
                     rendered = archive.redact_obj(json.loads(text))
@@ -96,8 +98,17 @@ def append_chunk(source: Path, offset: int, target: Path) -> tuple[int, int]:
                         "source_byte_offset": start,
                         "text": archive.redact_text(text),
                     }
-                out.write(json.dumps(rendered, ensure_ascii=False, sort_keys=True) + "\n")
+                rendered_line = json.dumps(rendered, ensure_ascii=False, sort_keys=True) + "\n"
+                encoded_size = len(rendered_line.encode("utf-8"))
+                if encoded_size > MAX_SINGLE_RECORD_BYTES:
+                    raise publisher.PublisherError("single Codex JSONL record exceeds safe GitHub file size")
+                if count and output_bytes + encoded_size > MAX_CHUNK_OUTPUT_BYTES:
+                    inp.seek(start)
+                    break
+                out.write(rendered_line)
+                output_bytes += encoded_size
                 count += 1
+                end = inp.tell()
             out.flush()
             os.fsync(out.fileno())
         if not count:
@@ -120,27 +131,44 @@ def append_rollout(repo: Path, source: Path) -> dict[str, Any]:
     manifest = load_json(manifest_path)
     offset = int(manifest.get("complete_through_byte") or 0)
     chunks = int(manifest.get("chunk_count") or 0)
-    size = source.stat().st_size
-    if size <= offset:
+    stat = source.stat()
+    size = stat.st_size
+
+    if size < offset:
+        key = f"{key}-{digest(f'{stat.st_mtime_ns}:{size}')[:8]}"
+        base = repo / "native-sessions" / sid / "sources" / key
+        manifest_path = base / "manifest.json"
+        manifest = load_json(manifest_path)
+        offset = int(manifest.get("complete_through_byte") or 0)
+        chunks = int(manifest.get("chunk_count") or 0)
+
+    total_records = 0
+    while size > offset:
+        target = base / "chunks" / f"{chunks + 1:06d}.jsonl"
+        end, records = append_chunk(source, offset, target)
+        if not records:
+            break
+        offset = end
+        chunks += 1
+        total_records += records
+
+    if not total_records:
         return {"changed": False, "records": 0}
-    target = base / "chunks" / f"{chunks + 1:06d}.jsonl"
-    end, records = append_chunk(source, offset, target)
-    if not records:
-        return {"changed": False, "records": 0}
+
     payload = {
         "schema": "codex-usage.native-session-dump.v1",
         "generated_by": f"codex_chat_dump_publisher {VERSION}",
         "session_id": sid,
         "source_path": str(source),
         "source_key": key,
-        "complete_through_byte": end,
+        "complete_through_byte": offset,
         "source_size_bytes_observed": size,
-        "chunk_count": chunks + 1,
+        "chunk_count": chunks,
         "format": "redacted native JSONL in ordered incremental chunks",
         "updated_at_utc": publisher.utc_stamp(),
     }
     write_text(manifest_path, json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
-    return {"changed": True, "records": records}
+    return {"changed": True, "records": total_records}
 
 
 def rebuild_index(repo: Path) -> None:
