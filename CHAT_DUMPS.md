@@ -1,6 +1,6 @@
 # Complete Codex chat dumps
 
-`codex_chat_dump_publisher.py` mirrors the native Codex rollout JSONL written under `~/.codex/sessions` into the private `gernalix/codex-usage` data repository.
+`codex_chat_dump_publisher.py` runs on the Fedora workstation and mirrors the native Codex rollout JSONL written under `~/.codex/sessions` into the private `gernalix/codex-usage` data repository. It must not run on the Oracle VM because the native Codex session source exists on the workstation.
 
 The existing session archive remains the source for exact local gzip copies. The GitHub mirror is intended for remote inspection without manual copy/paste, so each complete native JSONL record is preserved structurally but passed through the repository's existing redaction logic before publication.
 
@@ -32,11 +32,15 @@ The publisher shares the existing `publisher.lock` and the existing private `cod
 
 ## Automation
 
-`codex-usage-publisher.service` runs the normal usage publisher first and then the complete chat-dump publisher. The existing `codex-usage-publisher.timer` runs the service every minute.
+On Fedora, `codex-usage-publisher.service` runs the normal usage publisher first and then the complete chat-dump publisher. The existing `codex-usage-publisher.timer` runs the service every minute.
 
-`deploy_runtime.py` includes `codex_chat_dump_publisher.py` in the immutable runtime release.
+`deploy_runtime.py` includes `codex_chat_dump_publisher.py` in the immutable Fedora runtime release.
+
+No duplicate publisher service/timer should remain active on Oracle after the Fedora cutover is verified.
 
 ## Manual verification
+
+Run on Fedora:
 
 ```bash
 python3 codex_chat_dump_publisher.py run --no-push
