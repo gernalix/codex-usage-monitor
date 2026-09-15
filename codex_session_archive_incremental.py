@@ -80,11 +80,14 @@ def incremental_import(root: Path, source_root: Path, codex_dir: Path) -> dict[s
     archive.init_db(root)
     archive.ensure_private_dir(root)
 
-    known_sessions = archived_session_sizes(root)
-    known_sources = archived_source_sizes(root)
-    changed, seen = changed_rollouts(source_root, known_sessions)
-
+    # Read the archive state only after taking the import lock. Otherwise a
+    # concurrent full/incremental import can update the index between the
+    # preflight and lock acquisition, making this run operate on stale sizes.
     with archive.ExclusiveLock(root / "locks/import.lock", blocking=True):
+        known_sessions = archived_session_sizes(root)
+        known_sources = archived_source_sizes(root)
+        changed, seen = changed_rollouts(source_root, known_sessions)
+
         run_started = archive.utc_stamp()
         with closing(archive.connect_db(root)) as con:
             cur = con.execute(
