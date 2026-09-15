@@ -9,7 +9,7 @@ Environment=PYTHONUNBUFFERED=1
 WorkingDirectory=/home/daniele/.local/lib/codex-usage-monitor/current
 ExecStart=/usr/bin/python3 /home/daniele/.local/lib/codex-usage-monitor/current/codex_usage_publisher.py run
 ExecStart=/usr/bin/python3 /home/daniele/.local/lib/codex-usage-monitor/current/codex_chat_dump_publisher.py run
-TimeoutStartSec=600
+TimeoutStartSec=1800
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
