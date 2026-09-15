@@ -1,31 +1,50 @@
 # codex-usage-monitor
 
-Independent Oracle VM monitor for Codex quota observations.
+Fedora-local monitor, archive and publisher for Codex usage data.
 
-The monitor reads the existing Codex app-server JSON-RPC method
-`account/rateLimits/read`, stores append-only observations in SQLite, and lets
-the existing Datasette service expose the database and views from
-`/home/ubuntu/sync_root/db`.
+## Canonical runtime topology
 
-Persistent application state lives only in SQLite. Notifications use the
-existing `/home/ubuntu/telegram_notify.py` helper.
+The **only canonical runtime for this repository is the Fedora workstation where Codex runs**. This is intentional: quota acquisition talks to the local Codex app-server, session/archive tooling reads `~/.codex`, and the usage/chat publishers read native rollouts from `~/.codex/sessions`.
 
-> GitHub repository autosync is owned by the separate
-> `gernalix/github-autosync` repository. Do not add its script or systemd units
-> back to this repository.
+The Oracle VM is **not** a runtime for `codex-usage-monitor` anymore. It may continue to host genuinely always-on infrastructure such as Uptime Kuma or Datasette, but it must not run a second Codex quota collector/publisher and does not need a working clone of this repository after the migration is verified.
 
-## Runtime
+GitHub repository autosync remains owned by the separate `gernalix/github-autosync` repository. Do not add its script or systemd units here.
 
-Default database:
+### Fedora paths
 
-`/home/ubuntu/sync_root/db/codex_usage_monitor.db`
+Quota database:
 
-Default unit:
+`/home/daniele/.local/share/codex-usage-monitor/codex_usage_monitor.db`
 
-`codex-usage-monitor.timer` runs `codex-usage-monitor.service` every 15 minutes.
-It uses `/usr/bin/python3` and only global/stdlib Python modules.
+State:
 
-## Commands
+`/home/daniele/.local/state/codex-usage-monitor`
+
+Source checkout:
+
+`/home/daniele/projects/codex-usage-monitor`
+
+Private published data checkout:
+
+`/home/daniele/projects/codex-usage`
+
+Native Codex sessions:
+
+`/home/daniele/.codex/sessions`
+
+### Fedora services
+
+- `codex-usage-monitor.timer` → quota acquisition every 15 minutes.
+- `codex-session-archive.timer` → passive local archive/index updates.
+- `codex-usage-publisher.timer` → usage/prompt/chat publication and complete redacted native chat dumps.
+
+There must be no equivalent active `codex-usage-monitor` service/timer on the Oracle VM after the Fedora cutover is validated.
+
+## Quota monitor
+
+The monitor reads the Codex app-server JSON-RPC method `account/rateLimits/read`, stores append-only observations in SQLite, and can send deduplicated Telegram notifications.
+
+Commands:
 
 ```bash
 python3 codex_usage_monitor.py init-db
@@ -34,7 +53,7 @@ python3 codex_usage_monitor.py status
 python3 codex_usage_monitor.py notify-test
 ```
 
-## Datasette Views
+SQLite views include:
 
 - `latest_state`
 - `history`
@@ -43,17 +62,17 @@ python3 codex_usage_monitor.py notify-test
 - `reset_count_changes`
 - `recent_failures`
 
-## Fedora Native Codex Session Archive
+A successful Fedora acquisition can also send a best-effort Uptime Kuma Push heartbeat. Kuma may live on the Oracle VM; the collector itself remains local on Fedora. See `UPTIME_KUMA.md`.
 
-This repository also contains a passive archive for native Codex CLI sessions.
-It does not wrap or replace `codex`; it imports files that Codex already writes
-under `~/.codex`.
+## Fedora native Codex session archive
+
+The passive archive imports files Codex already writes under `~/.codex`; it does not wrap or replace Codex.
 
 Archive root:
 
 `/home/daniele/.local/share/codex-session-archive`
 
-Main commands:
+Commands:
 
 ```bash
 python3 codex_session_archive.py init
@@ -66,49 +85,17 @@ python3 codex_session_archive.py install-user-systemd
 python3 codex_session_archive.py uninstall-user-systemd
 ```
 
-The archive stores exact gzip copies of native rollout JSONL files, normalized
-JSONL, Markdown views, per-rollout manifests, a SQLite index, and available
-Codex history/thread metadata. `archive_id` identifies one materialized rollout
-file; `session_id` remains the native Codex thread/session id and may appear on
-multiple `archive_id` records when a session was resumed. Normalized files apply
-best-effort secret redaction; raw copies are exact and stored with restrictive
-permissions.
+The archive stores exact gzip copies of native rollout JSONL files, normalized JSONL, Markdown views, per-rollout manifests, a SQLite index and available Codex history/thread metadata. `archive_id` identifies one materialized rollout file; `session_id` remains the native Codex thread/session id and can appear on multiple archive records when a session is resumed.
 
-The timer's hot path is incremental. `codex_session_archive_incremental.py`
-compares the current size of each native rollout with `source_size_bytes` already
-stored in `archive.sqlite`. Codex rollout JSONL files are append-only, so an
-unchanged size means the file is not opened, copied or SHA256-hashed again. New
-or grown rollouts alone are passed to the canonical `import_session()` path,
-which retains snapshot + hash verification. The original
-`codex_session_archive.py import` remains the explicit full/fallback importer.
+Normalized files apply best-effort secret redaction. Exact raw copies remain local with restrictive permissions and are not published to GitHub.
+
+The timer hot path is incremental. `codex_session_archive_incremental.py` compares current rollout size with `source_size_bytes` already stored in `archive.sqlite`; unchanged append-only files are not reopened, copied or hashed. The full `codex_session_archive.py import` remains the explicit fallback/rebuild path.
 
 ## Per-session and per-prompt cost metrics
 
-`codex_task_costs.py` is the canonical full rebuild from native Codex rollout
-JSONL. Native `token_count` events are cumulative for the session; the derived
-`prompt_costs` rows are deltas for each real `PROMPT_ID=` user message, so
-multiple roadmap prompts executed in the same Codex chat are measured
-separately. `PROMPT_ID` strings merely echoed by tools, files, or assistant
-output are not treated as prompt boundaries.
+`codex_task_costs.py` is the canonical full rebuild from native Codex rollout JSONL. Native `token_count` events are cumulative for a session; derived `prompt_costs` rows are deltas for real `PROMPT_ID=` user messages, so multiple roadmap prompts executed in one Codex chat remain separate measurements.
 
-After the incremental archive pass, `codex_task_costs_incremental.py` compares
-the archive index's already-computed `source_sha256`/size fingerprints with
-`cost_source_state`. Only new or changed rollout files are parsed; when nothing
-changed, no rollout is reopened and the cost DB/CSVs are left untouched. The
-first run after introducing the incremental state performs one bootstrap full
-build. Removed archived sources remove only their own derived cost rows.
-
-Together these two stages avoid both former full scans: unchanged rollouts are
-not rehashed by the archive importer and are not reparsed by the cost indexer.
-
-Use the full derivation only when the whole index must intentionally be rebuilt:
-
-```bash
-python3 codex_task_costs.py
-```
-
-For ordinary cost lookups use the read-only SQLite query helper. It does not
-rescan `~/.codex/sessions`, rewrite the database, or regenerate CSV files:
+`codex_task_costs_incremental.py` uses archive fingerprints and reparses only new or changed rollout files. For ordinary lookups use the read-only helper:
 
 ```bash
 python3 codex_prompt_cost_query.py --prompt-id 284731
@@ -116,57 +103,55 @@ python3 codex_prompt_cost_query.py --prompt-id 917364 --reasoning-effort low --l
 python3 codex_prompt_cost_query.py --prompt-id 284731 --json
 ```
 
-Normally the archive timer's incremental passes make a just-finished prompt
-available automatically. If an immediate lookup happens before that timer pass,
-use an explicit targeted refresh:
+If a lookup happens before the timer has processed a just-finished prompt, use a targeted refresh:
 
 ```bash
 python3 codex_prompt_cost_query.py --prompt-id 835917 --refresh-prompt --latest --json
 ```
 
-`--refresh-prompt` locates only native user-prompt boundaries for that ID and
-replaces only cost rows for matching rollout sources. With `--latest`, boundary
-timestamps select the genuinely newest execution and only that winning rollout
-is fully parsed. It does not rebuild unrelated `session_costs`; when incremental
-source state is already initialized, the targeted refresh also updates that
-source fingerprint so the following timer pass does not parse it again. A prompt
-cannot know its own final cost while it is still running because its final native
-`token_count` and `task_complete` do not exist until completion.
+Outputs under `~/.local/share/codex-session-archive/index/` include:
 
-Outputs under `~/.local/share/codex-session-archive/index/`:
+- `task_costs.sqlite`
+- `task_costs.csv`
+- `prompt_costs.csv`
+- `expensive_sessions`
+- `expensive_prompts`
+- `model_reasoning_summary`
+- `prompt_model_reasoning_summary`
 
-- `task_costs.sqlite` — `session_costs`, exact derived `prompt_costs`, and incremental source fingerprints.
-- `task_costs.csv` — convenient per-session export.
-- `prompt_costs.csv` — per-`PROMPT_ID` token/quota deltas.
-- SQLite view `expensive_sessions` — sessions ordered by total tokens.
-- SQLite view `expensive_prompts` — prompt executions ordered by total tokens.
-- SQLite views `model_reasoning_summary` and `prompt_model_reasoning_summary` — aggregate comparisons by model/reasoning effort.
+Captured fields include model, reasoning effort, active duration, tool calls, reasoning items, input/cached/uncached/output/reasoning/total tokens, cache ratio and observed weekly quota changes. A prompt cannot know its final cost while it is still running because final `token_count` and `task_complete` events do not exist yet.
 
-Captured fields include model, reasoning effort, active duration, tool calls,
-reasoning items, input/cached/uncached/output/reasoning/total tokens, cache ratio,
-first/last weekly quota percentage and observed quota delta. Per-prompt token
-fields are deltas between the cumulative native token counter immediately before
-the prompt and the last counter observed before native `task_complete`. The same
-`task_complete` event ends `duration_seconds`, so time spent idle before the next
-user prompt is excluded. Older rollouts that omit `task_complete` but expose a
-following prompt are marked `next_prompt_fallback`; a prompt still active or
-abnormally terminated at EOF is marked `eof_incomplete`. Exact queries exclude
-`eof_incomplete` rows by default; use `--include-incomplete` only for diagnostics.
-This prevents a prompt from reporting its own mid-run token snapshot as a final
-cost. Repeated executions of the same `PROMPT_ID` remain separate rows; filters
-such as `--model`, `--reasoning-effort` and `--latest` disambiguate them without
-inspecting raw rollouts. Quota delta remains an observed prompt/session-window
-signal, not an exclusive attribution when concurrent Codex sessions consume the
-same quota.
+## Usage publisher
 
-A copied Codex UI/Markdown transcript does **not** include native `token_count`
-events, so exact token cost cannot be reconstructed from that transcript alone.
-Use the native archive metrics or the diagnostic bundle for exact analysis.
+`codex_usage_publisher.py` publishes redacted per-prompt and per-chat usage artifacts to the private `gernalix/codex-usage` repository. It also contains the completion guard used to detect local repositories that were modified but not clean/synchronized when a Codex task finished.
+
+The publisher is a Fedora-local process because it consumes native Codex rollouts and local repository state.
+
+## Complete redacted chat dumps
+
+`codex_chat_dump_publisher.py` incrementally mirrors native Codex rollout records to the private `gernalix/codex-usage` repository for remote inspection without manual copy/paste.
+
+Published layout:
+
+```text
+native-sessions/<session-id>/sources/<source-key>/
+  manifest.json
+  chunks/000001.jsonl
+  chunks/000002.jsonl
+  ...
+```
+
+Global lookup index:
+
+```text
+index/native-sessions.jsonl
+```
+
+The GitHub copy is structurally complete for readable native records but secret-redacted. Exact raw rollouts remain only in the local archive. See `CHAT_DUMPS.md`.
 
 ## Diagnostic usage bundle
 
-`codex_session_archive.py` can generate one ChatGPT-uploadable diagnostic ZIP
-for token and quota investigations:
+Generate a ChatGPT-uploadable diagnostic bundle with:
 
 ```bash
 python3 codex_session_archive.py diagnostic-bundle
@@ -176,10 +161,12 @@ Default output:
 
 `~/.local/share/codex-session-archive/exports/codex-usage-diagnostic-bundle-YYYYMMDDTHHMMSSZ.zip`
 
-The bundle contains `manifest.json`, a README, `task_costs.sqlite` (including the
-`prompt_costs` table), `task_costs.csv`, the archive index, redacted normalized
-session JSONL, per-session manifests, archive metadata, archive docs and any
-valid local quota/rate-limit monitor history. Raw rollout files, raw gzip
-archives, native Codex auth/state databases, shell snapshots, locks, temporary
-files and old backups are excluded. Missing optional sources are listed in
-`manifest.json` instead of failing the command.
+The bundle contains the usage databases/CSVs, redacted normalized session JSONL, per-session manifests and archive metadata. Raw rollouts, raw gzip archives, native Codex auth/state databases, shell snapshots, locks and secrets are excluded.
+
+## Deployment rule
+
+Production Fedora runtime must be deployed from a **clean, upstream-synchronized** `main` using `deploy_runtime.py`. The immutable runtime lives under:
+
+`/home/daniele/.local/lib/codex-usage-monitor`
+
+Do not maintain a second production deployment on the Oracle VM. If the VM still contains historical service/timer units or a checkout of this repository, retire them only after Fedora acquisition, archive, publisher, chat-dump publication and heartbeat behavior have all been verified.
