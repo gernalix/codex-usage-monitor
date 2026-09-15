@@ -1132,7 +1132,9 @@ def insert_snapshot(
             """,
             (minute_text, digest, status, provenance),
         ).fetchone()
-        snapshot_id = int(row["snapshot_id"]) if row else 0
+        if row is None:
+            raise
+        snapshot_id = int(row["snapshot_id"])
     if snapshot_id and reading and reading.payload is not None:
         insert_rate_limit_snapshots(con, snapshot_id, reading.payload)
     con.commit()
@@ -1357,7 +1359,7 @@ def build_notification_events(cfg: Config, con: sqlite3.Connection, snapshot_id:
             if 0 <= hours <= cfg.notify_approaching_expiry_hours:
                 events.append(
                     (
-                        f"approaching_expiry:{reset_at.strftime('%Y%m%dT%H')}",
+                        f"approaching_expiry:{reset_at.strftime('%Y%m%d')}",
                         "approaching_expiry",
                         "Codex weekly quota reset approaching",
                         "\n".join([f"Reset in: {hours:.1f} hours", *snapshot_message_lines(current)]),

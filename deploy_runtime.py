@@ -145,8 +145,8 @@ def deploy(source: Path, runtime_root: Path) -> dict[str, str]:
                 shutil.copy2(source / name, staging / name)
             write_manifest(staging, commit=commit, source=source, hashes=expected_hashes)
             verify_release(staging, commit=commit, expected_hashes=expected_hashes)
-            make_release_read_only(staging)
             staging.replace(release)
+            make_release_read_only(release)
 
     atomic_switch(runtime_root / "current", release)
     return {"commit": commit, "release": str(release), "current": str((runtime_root / "current").resolve())}

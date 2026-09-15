@@ -277,6 +277,30 @@ class ResetCountParsingTests(unittest.TestCase):
             quota_messages = [event[3] for event in events if event[1] == "quota_change"]
             self.assertEqual(len(quota_messages), 1)
 
+    def test_approaching_expiry_notifies_once_per_reset_date(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_cfg(tmp)
+            monitor.init_db(cfg)
+            sent_messages: list[tuple[str, str]] = []
+            now = monitor.utc_now()
+            first_reset = monitor.utc_stamp(now + dt.timedelta(hours=6))
+            shifted_reset = monitor.utc_stamp(now + dt.timedelta(hours=7))
+            with monitor.connect_db(cfg) as con, mock.patch.object(
+                monitor,
+                "send_telegram",
+                side_effect=lambda _cfg, title, message: sent_messages.append((title, message)) or "sent",
+            ):
+                run_id = monitor.start_run(con)
+                first_id = self.insert_reading(con, run_id, 12, 88, first_reset, 2)
+                monitor.dispatch_notifications(cfg, con, first_id)
+                second_id = self.insert_reading(con, run_id, 12, 88, shifted_reset, 2)
+                monitor.dispatch_notifications(cfg, con, second_id)
+
+            expiry_messages = [
+                message for title, message in sent_messages if title == "Codex weekly quota reset approaching"
+            ]
+            self.assertEqual(len(expiry_messages), 1)
+
     def test_quota_change_notification_includes_relevant_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self.make_cfg(tmp)
@@ -559,6 +583,25 @@ class ResetCountParsingTests(unittest.TestCase):
         self.assertIsNotNone(child)
         self.assertEqual(fk, [])
         self.assertEqual(integrity, "ok")
+
+    def test_insert_snapshot_reraises_unrelated_integrity_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_cfg(tmp)
+            monitor.init_db(cfg)
+            with monitor.connect_db(cfg) as con:
+                run_id = monitor.start_run(con)
+                con.execute(
+                    """
+                    CREATE TRIGGER unrelated_snapshot_integrity_error
+                    BEFORE INSERT ON quota_snapshots
+                    BEGIN
+                        SELECT RAISE(ABORT, 'unrelated integrity failure');
+                    END
+                    """
+                )
+                reading = monitor.QuotaReading(12, 88, "2026-09-19T17:00:37Z", 2, "test", "digest", "", (), None)
+                with self.assertRaisesRegex(Exception, "unrelated integrity failure"):
+                    monitor.insert_snapshot(con, run_id, "ok", reading)
 
 
 if __name__ == "__main__":
