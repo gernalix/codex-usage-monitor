@@ -1,7 +1,7 @@
 [project]
 name = "codex-usage-monitor"
-version = "2026.08.02"
-description = "Oracle VM Codex usage monitor with SQLite/Datasette persistence"
+version = "2026.09.15"
+description = "Codex quota monitoring, session archive, cost indexing, publishing, and health checks"
 requires-python = ">=3.10"
 dependencies = []
 
