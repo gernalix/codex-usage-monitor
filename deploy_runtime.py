@@ -14,6 +14,7 @@ DEFAULT_RUNTIME_ROOT = Path.home() / ".local/lib/codex-usage-monitor"
 RUNTIME_FILES = (
     "codex_usage_publisher.py",
     "codex_usage_publisher_legacy.py",
+    "codex_chat_dump_publisher.py",
     "codex_session_archive.py",
     "codex_usage_monitor.py",
 )
