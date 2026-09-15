@@ -1,5 +1,5 @@
 [Unit]
-Description=Publish Codex final-response usage artifacts
+Description=Publish Codex final-response usage artifacts and complete chat dumps
 Wants=network-online.target
 After=network-online.target
 
@@ -8,6 +8,7 @@ Type=oneshot
 Environment=PYTHONUNBUFFERED=1
 WorkingDirectory=/home/daniele/.local/lib/codex-usage-monitor/current
 ExecStart=/usr/bin/python3 /home/daniele/.local/lib/codex-usage-monitor/current/codex_usage_publisher.py run
+ExecStart=/usr/bin/python3 /home/daniele/.local/lib/codex-usage-monitor/current/codex_chat_dump_publisher.py run
 TimeoutStartSec=600
 NoNewPrivileges=true
 PrivateTmp=true
