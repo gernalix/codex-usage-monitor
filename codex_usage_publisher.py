@@ -501,6 +501,10 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
         if not prompt_id:
             if final_prompt_id:
                 prompt_id = final_prompt_id
+            elif last_prompt_id and not prompt_text.strip():
+                # A native cycle with no user message cannot introduce a new
+                # task. Treat it as an automatic continuation/resume.
+                prompt_id = last_prompt_id
             elif prompt_text.lstrip().startswith(_GOAL_PREFIX) and last_prompt_id:
                 prompt_id = last_prompt_id
             elif last_prompt_id and last_status == "BLOCKED" and _is_blocked_followup(prompt_text):
