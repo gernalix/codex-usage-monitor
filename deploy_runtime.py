@@ -11,6 +11,7 @@ import tempfile
 
 
 DEFAULT_RUNTIME_ROOT = Path.home() / ".local/lib/codex-usage-monitor"
+DEFAULT_FETCH_TIMEOUT_SECONDS = 30
 RUNTIME_FILES = (
     "codex_usage_publisher.py",
     "codex_usage_publisher_base.py",
@@ -37,7 +38,12 @@ def git_stdout(args: list[str], cwd: Path) -> str:
     return result.stdout.strip()
 
 
-def assert_clean_synced(source: Path) -> str:
+def assert_clean_synced(
+    source: Path,
+    *,
+    fetch: bool = True,
+    fetch_timeout: int = DEFAULT_FETCH_TIMEOUT_SECONDS,
+) -> str:
     status = run(["git", "status", "--porcelain"], source)
     if status.returncode != 0:
         raise DeployError("git status failed")
@@ -45,10 +51,14 @@ def assert_clean_synced(source: Path) -> str:
         raise DeployError("worktree dirty")
 
     upstream = git_stdout(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], source)
-    remote = upstream.split("/", 1)[0] if "/" in upstream else upstream
-    fetched = run(["git", "fetch", remote], source, timeout=180)
-    if fetched.returncode != 0:
-        raise DeployError(f"git fetch {remote} failed: {(fetched.stderr or fetched.stdout).strip()}")
+    if fetch:
+        remote = upstream.split("/", 1)[0] if "/" in upstream else upstream
+        try:
+            fetched = run(["git", "fetch", remote], source, timeout=fetch_timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise DeployError(f"git fetch {remote} timed out after {fetch_timeout}s") from exc
+        if fetched.returncode != 0:
+            raise DeployError(f"git fetch {remote} failed: {(fetched.stderr or fetched.stdout).strip()}")
 
     head = git_stdout(["rev-parse", "HEAD"], source)
     upstream_sha = git_stdout(["rev-parse", upstream], source)
@@ -129,10 +139,16 @@ def atomic_switch(current: Path, release: Path) -> None:
     tmp_link.replace(current)
 
 
-def deploy(source: Path, runtime_root: Path) -> dict[str, str]:
+def deploy(
+    source: Path,
+    runtime_root: Path,
+    *,
+    fetch: bool = True,
+    fetch_timeout: int = DEFAULT_FETCH_TIMEOUT_SECONDS,
+) -> dict[str, str]:
     source = source.resolve()
     runtime_root.mkdir(parents=True, exist_ok=True)
-    commit = assert_clean_synced(source)
+    commit = assert_clean_synced(source, fetch=fetch, fetch_timeout=fetch_timeout)
     expected_hashes = runtime_hashes(source)
     releases = runtime_root / "releases"
     releases.mkdir(parents=True, exist_ok=True)
@@ -159,9 +175,27 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Deploy codex-usage-monitor publisher runtime")
     parser.add_argument("--source", default=str(Path(__file__).resolve().parent))
     parser.add_argument("--runtime-root", default=str(DEFAULT_RUNTIME_ROOT))
+    parser.add_argument(
+        "--skip-fetch",
+        action="store_true",
+        help="Use the already-fetched upstream ref; still require a clean worktree and HEAD == upstream.",
+    )
+    parser.add_argument(
+        "--fetch-timeout",
+        type=int,
+        default=DEFAULT_FETCH_TIMEOUT_SECONDS,
+        help=f"Maximum seconds for the safety git fetch (default: {DEFAULT_FETCH_TIMEOUT_SECONDS}).",
+    )
     args = parser.parse_args(argv)
+    if args.fetch_timeout <= 0:
+        parser.error("--fetch-timeout must be greater than zero")
     try:
-        result = deploy(Path(args.source), Path(args.runtime_root).expanduser())
+        result = deploy(
+            Path(args.source),
+            Path(args.runtime_root).expanduser(),
+            fetch=not args.skip_fetch,
+            fetch_timeout=args.fetch_timeout,
+        )
     except DeployError as exc:
         print(json.dumps({"status": "error", "error": str(exc)}, sort_keys=True))
         return 75
