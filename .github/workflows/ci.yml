@@ -31,6 +31,7 @@ jobs:
           tests.test_session_archive_incremental
           tests.test_usage_publisher
           tests.test_usage_publisher_regressions
+          tests.test_goal_abort_recovery
           tests.test_chat_dump_publisher
           tests.test_quota_notification_policy
           tests.test_uptime_kuma_push
