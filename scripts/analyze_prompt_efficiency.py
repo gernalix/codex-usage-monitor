@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from contextlib import closing
 import json
 from pathlib import Path
 import re
+import sqlite3
 from typing import Any
 
 
@@ -17,6 +19,7 @@ ROADMAP_META_MARKERS = (
     "/codex-roadmap/STANDARD_PROMPT.md",
 )
 ROUNDTRIP_HEAVY_TOOL_CALL_THRESHOLD = 30
+DEFAULT_COST_DB = Path.home() / ".local/share/codex-session-archive/index/task_costs.sqlite"
 ADB_INSTALL_RE = re.compile(r"\badb\s+(?P<before_install>[^;&|\n]*?)\binstall\b", re.I)
 
 
@@ -47,6 +50,35 @@ def load_jsonl(path: Path | None) -> list[dict[str, Any]]:
             if isinstance(row, dict):
                 rows.append(row)
     return rows
+
+
+def load_prompt_attempts(db_path: Path, prompt_id: str) -> list[dict[str, Any]]:
+    """Read every completed cost row for one PROMPT_ID without reparsing rollouts."""
+    db_path = db_path.expanduser().resolve()
+    if not db_path.is_file():
+        raise RuntimeError(f"cost database not found: {db_path}; run codex_task_costs.py to rebuild it")
+    uri = f"file:{db_path}?mode=ro"
+    try:
+        with closing(sqlite3.connect(uri, uri=True, timeout=5)) as con:
+            con.row_factory = sqlite3.Row
+            exists = con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='prompt_costs'"
+            ).fetchone()
+            if exists is None:
+                raise RuntimeError("prompt_costs table missing; run codex_task_costs.py to rebuild metrics")
+            return [
+                dict(row)
+                for row in con.execute(
+                    """
+                    SELECT * FROM prompt_costs
+                    WHERE prompt_id=? AND COALESCE(completion_state, '') <> 'eof_incomplete'
+                    ORDER BY first_timestamp_utc, source_path, prompt_seq
+                    """,
+                    (prompt_id,),
+                ).fetchall()
+            ]
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"cannot read cost database: {exc}") from exc
 
 
 def _command_text(event: dict[str, Any]) -> str:
@@ -153,16 +185,104 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
     }
 
 
+def aggregate_attempts(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate all completed attempts for a PROMPT_ID into one efficiency view."""
+    if not rows:
+        return {"prompt_id": None, "attempt_count": 0, "attempts": [], "findings": []}
+
+    def sum_int(key: str) -> int:
+        return sum(int(row.get(key) or 0) for row in rows)
+
+    prompt_ids = list(dict.fromkeys(str(row.get("prompt_id")) for row in rows if row.get("prompt_id")))
+    input_tokens = sum_int("input_tokens")
+    cached = sum_int("cached_input_tokens")
+    uncached = sum_int("uncached_input_tokens")
+    output_tokens = sum_int("output_tokens")
+    reasoning_output_tokens = sum_int("reasoning_output_tokens")
+    total_tokens = sum_int("total_tokens")
+    tool_calls = sum_int("tool_call_count")
+    duration = sum(float(row.get("duration_seconds") or 0.0) for row in rows)
+    cache_ratio = (cached / input_tokens) if input_tokens else None
+    uncached_share = (uncached / input_tokens) if input_tokens else None
+    models = list(dict.fromkeys(str(row.get("model")) for row in rows if row.get("model")))
+    reasoning_efforts = list(
+        dict.fromkeys(str(row.get("reasoning_effort")) for row in rows if row.get("reasoning_effort"))
+    )
+
+    findings: list[dict[str, Any]] = []
+    if len(rows) > 1:
+        findings.append({"code": "multiple_prompt_attempts", "count": len(rows)})
+    if len(rows) > 1 and tool_calls >= ROUNDTRIP_HEAVY_TOOL_CALL_THRESHOLD and uncached < 10_000:
+        findings.append(
+            {
+                "code": "multi_attempt_roundtrip_churn",
+                "attempts": len(rows),
+                "tool_calls": tool_calls,
+                "uncached_input_tokens": uncached,
+            }
+        )
+
+    attempts = [
+        {
+            "started_at_utc": row.get("first_timestamp_utc"),
+            "completion_state": row.get("completion_state"),
+            "model": row.get("model"),
+            "reasoning_effort": row.get("reasoning_effort"),
+            "total_tokens": int(row.get("total_tokens") or 0),
+            "uncached_input_tokens": int(row.get("uncached_input_tokens") or 0),
+            "tool_call_count": int(row.get("tool_call_count") or 0),
+            "duration_seconds": float(row.get("duration_seconds") or 0.0),
+        }
+        for row in rows
+    ]
+
+    return {
+        "prompt_id": prompt_ids[0] if len(prompt_ids) == 1 else prompt_ids,
+        "attempt_count": len(rows),
+        "models": models,
+        "reasoning_efforts": reasoning_efforts,
+        "total_tokens": total_tokens,
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cached,
+        "uncached_input_tokens": uncached,
+        "output_tokens": output_tokens,
+        "reasoning_output_tokens": reasoning_output_tokens,
+        "duration_seconds": duration,
+        "cache_ratio": cache_ratio,
+        "uncached_input_share": uncached_share,
+        "tool_call_count": tool_calls,
+        "tool_calls_per_attempt": tool_calls / len(rows),
+        "attempts": attempts,
+        "findings": findings,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Summarize token/tool efficiency from published Codex metrics.")
-    parser.add_argument("metrics", type=Path, help="Path to a prompt metrics.json file")
+    parser = argparse.ArgumentParser(description="Summarize token/tool efficiency from published or indexed Codex metrics.")
+    parser.add_argument("metrics", nargs="?", type=Path, help="Path to one prompt metrics.json file")
     parser.add_argument("--transcript", type=Path, help="Optional matching transcript.jsonl")
+    parser.add_argument("--prompt-id", help="Aggregate every completed indexed attempt for this PROMPT_ID")
+    parser.add_argument("--cost-db", type=Path, default=DEFAULT_COST_DB, help="prompt_costs SQLite index")
     args = parser.parse_args(argv)
 
-    metrics = json.loads(args.metrics.read_text(encoding="utf-8"))
-    if not isinstance(metrics, dict):
-        parser.error("metrics JSON must contain an object")
-    result = analyze(metrics, load_jsonl(args.transcript))
+    if args.prompt_id:
+        if args.metrics is not None or args.transcript is not None:
+            parser.error("--prompt-id cannot be combined with metrics/transcript paths")
+        try:
+            rows = load_prompt_attempts(args.cost_db, args.prompt_id)
+        except RuntimeError as exc:
+            parser.exit(2, f"error: {exc}\n")
+        if not rows:
+            parser.exit(1, f"no completed rows for PROMPT_ID={args.prompt_id}\n")
+        result = aggregate_attempts(rows)
+    else:
+        if args.metrics is None:
+            parser.error("provide metrics.json or --prompt-id")
+        metrics = json.loads(args.metrics.read_text(encoding="utf-8"))
+        if not isinstance(metrics, dict):
+            parser.error("metrics JSON must contain an object")
+        result = analyze(metrics, load_jsonl(args.transcript))
+
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
     return 0
 
