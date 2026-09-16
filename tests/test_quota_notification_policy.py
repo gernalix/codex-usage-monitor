@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-import codex_usage_monitor as monitor
+from codex_monitor.capsules.quota import implementation as monitor
 
 
 class QuotaNotificationPolicyTests(unittest.TestCase):

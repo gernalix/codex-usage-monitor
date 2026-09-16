@@ -6,7 +6,7 @@ import sqlite3
 import tempfile
 import unittest
 
-import codex_usage_publisher as publisher
+from codex_monitor.capsules.publishing import base as publisher
 
 
 def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:

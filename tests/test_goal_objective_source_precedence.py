@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-import codex_usage_publisher as publisher
+from codex_monitor.capsules.publishing import implementation as publisher
 
 
 class GoalObjectiveSourcePrecedenceTest(unittest.TestCase):

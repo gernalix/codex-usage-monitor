@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-import codex_usage_publisher as publisher
+from codex_monitor.capsules.publishing import base as publisher
 
 
 class PublisherPathMetricTests(unittest.TestCase):

@@ -7,8 +7,8 @@ import unittest
 from unittest import mock
 
 import deploy_runtime
-import codex_usage_publisher as publisher
-import codex_usage_publisher_legacy as legacy
+from codex_monitor.capsules.publishing import base as publisher
+from codex_monitor.capsules.publishing import legacy
 
 
 def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:

@@ -5,7 +5,7 @@ import subprocess
 import unittest
 from unittest import mock
 
-import deploy_runtime
+from codex_monitor.capsules.runtime_deploy import implementation as deploy_runtime
 
 
 class DeployRuntimeDependenciesTest(unittest.TestCase):

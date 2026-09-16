@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-import codex_usage_publisher as publisher
+from codex_monitor.capsules.publishing import implementation as publisher
 
 
 class PromptCyclePublicationTests(unittest.TestCase):
@@ -42,12 +42,12 @@ class PromptCyclePublicationTests(unittest.TestCase):
             repo = root / "repo"
             repo.mkdir()
 
-            old_should_export = publisher._should_export
+            old_should_export = publisher._base._should_export
             try:
-                publisher._should_export = True
+                publisher._base._should_export = True
                 publisher.export_repo(repo, self.cycles(), {}, root / "missing.sqlite")
             finally:
-                publisher._should_export = old_should_export
+                publisher._base._should_export = old_should_export
 
             index_rows = [
                 json.loads(line)
@@ -76,12 +76,12 @@ class PromptCyclePublicationTests(unittest.TestCase):
             repo = root / "repo"
             repo.mkdir()
 
-            old_should_export = publisher._should_export
+            old_should_export = publisher._base._should_export
             try:
-                publisher._should_export = False
+                publisher._base._should_export = False
                 publisher.export_repo(repo, self.cycles(), {}, root / "missing.sqlite")
             finally:
-                publisher._should_export = old_should_export
+                publisher._base._should_export = old_should_export
 
             self.assertTrue((repo / "prompts/583214/cycles/cycle-a/metrics.json").is_file())
             self.assertTrue((repo / "prompts/583214/cycles/cycle-b/metrics.json").is_file())

@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sqlite3
-import sys
 from typing import Any
 
 from . import base as _base
@@ -290,7 +289,7 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
         last_status = str(metrics.get("status") or "UNKNOWN")
 
     if changed:
-        _base._should_export = True
+        _base.mark_export_required()
     return cycles, events
 
 
@@ -325,7 +324,7 @@ def export_repo(
     """
     migration_needed = _stable_layout_missing(repo, cycles)
     _BASE_EXPORT_REPO(repo, cycles, chat_events_by_id, quota_db)
-    if not _base._should_export and not migration_needed:
+    if not _base.export_required() and not migration_needed:
         return
 
     prompt_rows: list[dict[str, Any]] = []
@@ -399,7 +398,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-# Make imports receive the patched mature module itself so existing monkeypatch
-# tests still target the globals used by its functions.
-sys.modules[__name__] = _base

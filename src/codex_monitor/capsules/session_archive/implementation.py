@@ -1064,7 +1064,7 @@ def command_diagnostic_bundle(args: argparse.Namespace) -> int:
     output = Path(args.output).expanduser() if args.output else root / "exports" / f"codex-usage-diagnostic-bundle-{utc_now().strftime('%Y%m%dT%H%M%SZ')}.zip"
     ensure_private_dir(output.parent)
     with ExclusiveLock(root / "locks/import.lock", blocking=True):
-        task_costs_script = Path(__file__).resolve().with_name("codex_task_costs.py")
+        task_costs_script = Path(__file__).resolve().parents[4] / "codex_task_costs.py"
         if task_costs_script.exists():
             subprocess.run([sys.executable, str(task_costs_script), "--source-root", str(source_root), "--archive-root", str(root)], check=True)
         else:

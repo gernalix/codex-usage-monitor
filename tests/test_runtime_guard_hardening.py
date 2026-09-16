@@ -7,8 +7,8 @@ import subprocess
 import tempfile
 import unittest
 
-import codex_usage_publisher as publisher
-import deploy_runtime
+from codex_monitor.capsules.publishing import base as publisher
+from codex_monitor.capsules.runtime_deploy import implementation as deploy_runtime
 
 
 def run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -26,7 +26,10 @@ class RuntimeGuardHardeningTests(unittest.TestCase):
         self.assertEqual(0, run(["git", "config", "user.name", "Test"], repo).returncode)
         for name in deploy_runtime.RUNTIME_FILES:
             (repo / name).write_text("VALUE = 1\n", encoding="utf-8")
-        self.assertEqual(0, run(["git", "add", *deploy_runtime.RUNTIME_FILES], repo).returncode)
+        package = repo / deploy_runtime.RUNTIME_PACKAGE
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("\n", encoding="utf-8")
+        self.assertEqual(0, run(["git", "add", *deploy_runtime.RUNTIME_FILES, "src/codex_monitor"], repo).returncode)
         self.assertEqual(0, run(["git", "commit", "-m", "base"], repo).returncode)
         self.assertEqual(0, run(["git", "branch", "-M", "main"], repo).returncode)
         self.assertEqual(0, run(["git", "push", "-u", "origin", "main"], repo).returncode)

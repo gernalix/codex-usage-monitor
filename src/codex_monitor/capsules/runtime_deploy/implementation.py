@@ -13,14 +13,22 @@ import tempfile
 DEFAULT_RUNTIME_ROOT = Path.home() / ".local/lib/codex-usage-monitor"
 DEFAULT_FETCH_TIMEOUT_SECONDS = 30
 RUNTIME_FILES = (
+    "codex_usage_monitor.py",
+    "uptime_kuma_push.py",
+    "codex_session_archive.py",
+    "codex_session_archive_incremental.py",
+    "codex_task_costs.py",
+    "codex_task_costs_incremental.py",
+    "codex_prompt_cost_query.py",
+    "codex_curated_vault.py",
     "codex_usage_publisher.py",
     "codex_usage_publisher_base.py",
     "codex_usage_publisher_legacy.py",
     "codex_chat_dump_publisher.py",
     "codex_session_archive.py",
-    "codex_usage_monitor.py",
     "github_actions_watch.py",
 )
+RUNTIME_PACKAGE = Path("src/codex_monitor")
 
 
 class DeployError(RuntimeError):
@@ -82,18 +90,25 @@ def runtime_hashes(root: Path) -> dict[str, str]:
         if not path.is_file():
             raise DeployError(f"missing runtime file: {name}")
         hashes[name] = file_sha256(path)
+    package = root / RUNTIME_PACKAGE
+    if not package.is_dir():
+        raise DeployError(f"missing runtime package: {RUNTIME_PACKAGE}")
+    for path in sorted(package.rglob("*.py")):
+        relative = path.relative_to(root).as_posix()
+        hashes[relative] = file_sha256(path)
     return hashes
 
 
 def compile_release(release: Path) -> None:
-    for name in RUNTIME_FILES:
-        path = release / name
+    paths = [release / name for name in RUNTIME_FILES]
+    paths.extend(sorted((release / RUNTIME_PACKAGE).rglob("*.py")))
+    for path in paths:
         if not path.is_file():
-            raise DeployError(f"missing runtime file: {name}")
+            raise DeployError(f"missing runtime file: {path.relative_to(release)}")
         try:
             compile(path.read_text(encoding="utf-8"), str(path), "exec")
         except SyntaxError as exc:
-            raise DeployError(f"syntax error in runtime file {name}: {exc.msg}") from exc
+            raise DeployError(f"syntax error in runtime file {path.relative_to(release)}: {exc.msg}") from exc
 
 
 def write_manifest(release: Path, *, commit: str, source: Path, hashes: dict[str, str]) -> None:
@@ -124,10 +139,11 @@ def verify_release(release: Path, *, commit: str, expected_hashes: dict[str, str
 
 
 def make_release_read_only(release: Path) -> None:
-    for name in (*RUNTIME_FILES, "manifest.json"):
-        path = release / name
-        if path.exists():
+    for path in release.rglob("*"):
+        if path.is_file():
             path.chmod(0o444)
+    for path in sorted((item for item in release.rglob("*") if item.is_dir()), reverse=True):
+        path.chmod(0o555)
     release.chmod(0o555)
 
 
@@ -162,6 +178,7 @@ def deploy(
             staging.mkdir(parents=True)
             for name in RUNTIME_FILES:
                 shutil.copy2(source / name, staging / name)
+            shutil.copytree(source / RUNTIME_PACKAGE, staging / RUNTIME_PACKAGE)
             write_manifest(staging, commit=commit, source=source, hashes=expected_hashes)
             verify_release(staging, commit=commit, expected_hashes=expected_hashes)
             staging.replace(release)

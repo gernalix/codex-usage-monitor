@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
-import codex_usage_monitor as monitor
+from codex_monitor.capsules.quota import implementation as monitor
 
 
 class ResetCountParsingTests(unittest.TestCase):

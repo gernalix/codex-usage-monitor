@@ -58,6 +58,15 @@ _notify_cycle_objects: set[int] = set()
 _guard_candidate_cycles: dict[str, dict[str, Any]] = {}
 
 
+def mark_export_required() -> None:
+    global _should_export
+    _should_export = True
+
+
+def export_required() -> bool:
+    return _should_export
+
+
 def _literal_prompt_id(text: str) -> str | None:
     prompt_id = legacy.archive.prompt_id_from_text(text)
     if prompt_id:
@@ -525,10 +534,13 @@ def parse_session(
         prompt_id = metrics.get("prompt_id")
         prompt_text = str(metrics.get("prompt_text_redacted") or "")
         final_text = str(metrics.get("final_response_redacted") or "")
+        user_prompt_id = prompt_id_from_text(prompt_text)
         final_prompt_id = prompt_id_from_text(final_text)
 
         if not prompt_id:
-            if final_prompt_id:
+            if user_prompt_id:
+                prompt_id = user_prompt_id
+            elif final_prompt_id:
                 prompt_id = final_prompt_id
             elif last_prompt_id and not prompt_text.strip():
                 # A native cycle with no user message cannot introduce a new
@@ -602,14 +614,17 @@ def send_batch_telegram(cycles: list[dict[str, Any]], dry_run: bool) -> bool:
 def command_run(
     args,
     *,
-    parse_session_fn=parse_session,
-    export_repo_fn=export_repo,
-    send_batch_telegram_fn=send_batch_telegram,
+    parse_session_fn=None,
+    export_repo_fn=None,
+    send_batch_telegram_fn=None,
 ) -> int:
     global _should_export, _notify_cycle_objects, _guard_candidate_cycles
     _should_export = False
     _notify_cycle_objects = set()
     _guard_candidate_cycles = {}
+    parse_session_fn = parse_session_fn or parse_session
+    export_repo_fn = export_repo_fn or export_repo
+    send_batch_telegram_fn = send_batch_telegram_fn or send_batch_telegram
     result = int(
         _legacy_command_run(
             args,
