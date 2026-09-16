@@ -13,12 +13,16 @@ from codex_usage_publisher_legacy import *  # noqa: F401,F403
 
 
 VERSION = "2026.09.16"
-FINGERPRINT_SCHEMA = 2
+FINGERPRINT_SCHEMA = 3
 GUARD_METADATA_KEYS = {"repo_project", "repo_paths", "repo_projects", "repo_write_projects", "repo_path_kinds"}
 _GOAL_PREFIX = '<codex_internal_context source="goal">'
 ATTACHMENTS_ROOT = Path.home() / ".codex/attachments"
 _ATTACHMENT_PATH_RE = re.compile(r"/[^\s`\"']*\.codex/attachments/[^\s`\"']+")
 _PROMPT_ID_FALLBACK_RE = re.compile(r"\bPROMPT_ID\s*[:=]\s*[`*_~]*([A-Za-z0-9_.-]+)\b")
+_BLOCKED_FOLLOWUP_PREFIX_RE = re.compile(
+    r"^(?:ok(?:ay)?|s[iì]|yes|done|fatto|fatta|eseguito|eseguita|procedi|continua|riprendi|vai|autorizzo|ho\s+fatto|l['’]?ho\s+fatto|go\s+ahead)\b",
+    re.I,
+)
 _legacy_connect_state = legacy.connect_state
 _legacy_parse_session = legacy.parse_session
 _legacy_export_repo = legacy.export_repo
@@ -68,10 +72,19 @@ def prompt_id_from_text(text: str) -> str | None:
 
 def status_from_final(text: str) -> str:
     normalized = (text or "").replace(r"\_", "_")
-    match = re.search(r"\bRESULT\s*[:=]\s*[`*_~]*\s*(PASS|BLOCKED|FAIL)\b", normalized, re.I)
+    match = re.search(
+        r"\bRESULT\s*[:=]\s*[`*_~]*\s*(?:(?:goal\s+marcato|status)\s+)?(PASS|BLOCKED|FAIL)\b",
+        normalized,
+        re.I,
+    )
     if match:
         return match.group(1).upper()
     return _legacy_status_from_final(text)
+
+
+def _is_blocked_followup(text: str) -> bool:
+    normalized = " ".join((text or "").strip().split())
+    return bool(normalized and len(normalized) <= 240 and _BLOCKED_FOLLOWUP_PREFIX_RE.match(normalized))
 
 
 def chat_metrics(chat_id: int, cycles: list[dict[str, Any]]) -> dict[str, Any]:
@@ -440,15 +453,11 @@ def _fingerprint(cycle: dict[str, Any]) -> str:
     return legacy.digest_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 
-def _full_fingerprint(cycle: dict[str, Any]) -> str:
-    payload = {"metrics": cycle["metrics"], "events": cycle["events"]}
-    return legacy.digest_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-
-
 def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     global _should_export
     cycles, events = _legacy_parse_session(path, con)
     last_prompt_id: str | None = None
+    last_status: str | None = None
     migrated = False
 
     for cycle in cycles:
@@ -487,18 +496,19 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
         if not prompt_id:
             if final_prompt_id:
                 prompt_id = final_prompt_id
-            elif last_prompt_id:
-                # Native Codex task continuations can be a goal-context turn, an
-                # acknowledgement such as "autorizzo", or an automatic resume.
-                # Keep the active PROMPT_ID until a later cycle provides a new one.
+            elif prompt_text.lstrip().startswith(_GOAL_PREFIX) and last_prompt_id:
+                prompt_id = last_prompt_id
+            elif last_prompt_id and last_status == "BLOCKED" and _is_blocked_followup(prompt_text):
                 prompt_id = last_prompt_id
             if prompt_id:
                 metrics["prompt_id"] = prompt_id
         if prompt_id:
             last_prompt_id = str(prompt_id)
+        else:
+            last_prompt_id = None
+        last_status = str(metrics.get("status") or "UNKNOWN")
 
         fingerprint = _fingerprint(cycle)
-        full_fingerprint = _full_fingerprint(cycle)
         cycle["source_sha256"] = fingerprint
         cycle["cycle_sha256"] = fingerprint
         cycle["fingerprint_schema"] = FINGERPRINT_SCHEMA
