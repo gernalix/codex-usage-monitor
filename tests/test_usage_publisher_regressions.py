@@ -29,7 +29,15 @@ def attached_prompt_cycle(attachment: Path, session_id: str = "01a0a7b0-92a8-7ff
         {"timestamp": "2026-09-16T00:49:22Z", "type": "session_meta", "payload": {"session_id": session_id}},
         {"timestamp": "2026-09-16T00:49:23Z", "type": "turn_context", "payload": {"turn_id": "turn-attached", "model": "gpt-5.6-sol", "collaboration_mode": {"settings": {"reasoning_effort": "medium"}}}},
         {"timestamp": "2026-09-16T00:49:24Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"text": f"Referenced pasted text files:\n- pasted text file: {attachment}. Read this file before continuing."}]}},
-        {"timestamp": "2026-09-16T00:49:25Z", "type": "event_msg", "payload": {"type": "task_complete", "turn_id": "turn-attached", "last_agent_message": "RESULT=PASS", "duration_ms": 1000}},
+        {"timestamp": "2026-09-16T00:49:25Z", "type": "event_msg", "payload": {"type": "task_complete", "turn_id": "turn-attached", "last_agent_message": "RESULT=BLOCKED", "duration_ms": 1000}},
+    ]
+
+
+def plain_followup() -> list[dict[str, object]]:
+    return [
+        {"timestamp": "2026-09-16T00:50:00Z", "type": "turn_context", "payload": {"turn_id": "turn-followup", "model": "gpt-5.6-sol", "collaboration_mode": {"settings": {"reasoning_effort": "medium"}}}},
+        {"timestamp": "2026-09-16T00:50:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"text": "autorizzo"}]}},
+        {"timestamp": "2026-09-16T00:50:02Z", "type": "event_msg", "payload": {"type": "task_complete", "turn_id": "turn-followup", "last_agent_message": "RESULT=PASS", "duration_ms": 500}},
     ]
 
 
@@ -68,6 +76,43 @@ class UsagePublisherRegressionTests(unittest.TestCase):
             finally:
                 publisher.ATTACHMENTS_ROOT = original_root
             self.assertEqual(cycles[0]["metrics"]["prompt_id"], "472913")
+
+    def test_plain_user_followup_inherits_active_prompt_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            attachments_root = root / ".codex/attachments"
+            attachment = attachments_root / "aaae875b-e112-49f9-8ae9-e911d81dddaa/pasted-text-1.txt"
+            attachment.parent.mkdir(parents=True)
+            attachment.write_text("PROMPT_ID=157771\n", encoding="utf-8")
+            session = root / "session.jsonl"
+            write_jsonl(session, attached_prompt_cycle(attachment) + plain_followup())
+            original_root = publisher.ATTACHMENTS_ROOT
+            publisher.ATTACHMENTS_ROOT = attachments_root
+            try:
+                with publisher.connect_state(root / "state") as con:
+                    cycles, _events = publisher.parse_session(session, con)
+            finally:
+                publisher.ATTACHMENTS_ROOT = original_root
+            self.assertEqual([cycle["metrics"]["prompt_id"] for cycle in cycles], ["157771", "157771"])
+
+    def test_chat_metrics_deduplicates_prompt_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            attachments_root = root / ".codex/attachments"
+            attachment = attachments_root / "aaae875b-e112-49f9-8ae9-e911d81dddaa/pasted-text-1.txt"
+            attachment.parent.mkdir(parents=True)
+            attachment.write_text("PROMPT_ID=157771\n", encoding="utf-8")
+            session = root / "session.jsonl"
+            write_jsonl(session, attached_prompt_cycle(attachment) + plain_followup())
+            original_root = publisher.ATTACHMENTS_ROOT
+            publisher.ATTACHMENTS_ROOT = attachments_root
+            try:
+                with publisher.connect_state(root / "state") as con:
+                    cycles, _events = publisher.parse_session(session, con)
+            finally:
+                publisher.ATTACHMENTS_ROOT = original_root
+            metrics = publisher.chat_metrics(int(cycles[0]["metrics"]["chat_id"]), cycles)
+            self.assertEqual(metrics["prompt_ids"], ["157771"])
 
     def test_existing_cycle_fingerprint_stays_stable_when_rollout_grows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
