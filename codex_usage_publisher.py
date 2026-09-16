@@ -11,9 +11,10 @@ import codex_usage_publisher_base as _base
 from codex_usage_publisher_base import *  # noqa: F401,F403
 
 
-VERSION = "2026.09.16.3"
+VERSION = "2026.09.16.4"
 _ORIGINAL_LEGACY_PARSE_SESSION = _base._legacy_parse_session
 _BASE_PARSE_SESSION = _base.parse_session
+_BASE_EXPORT_REPO = _base.export_repo
 
 
 def _goal_completion(text: str) -> dict[str, Any] | None:
@@ -251,12 +252,90 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
     return cycles, events
 
 
+def _stable_prompt_dir(metrics: dict[str, Any]) -> Path:
+    prompt_id = metrics.get("prompt_id")
+    cycle_key = str(metrics["cycle_key"])
+    if prompt_id:
+        return Path("prompts") / str(prompt_id) / "cycles" / cycle_key
+    return Path("prompts/unassigned") / cycle_key
+
+
+def export_repo(
+    repo: Path,
+    cycles: list[dict[str, Any]],
+    chat_events_by_id: dict[int, list[dict[str, Any]]],
+    quota_db: Path,
+) -> None:
+    """Publish every assigned prompt cycle without overwriting earlier runs.
+
+    The historical flat `prompts/<PROMPT_ID>/metrics.json` and transcript remain
+    as a compatibility alias for the latest cycle, while the prompt index points
+    at immutable `cycles/<cycle_key>` paths.
+    """
+    _BASE_EXPORT_REPO(repo, cycles, chat_events_by_id, quota_db)
+    if not _base._should_export:
+        return
+
+    prompt_rows: list[dict[str, Any]] = []
+    latest_by_prompt: dict[str, dict[str, Any]] = {}
+    for cycle in cycles:
+        metrics = cycle["metrics"]
+        rel = _stable_prompt_dir(metrics)
+        prompt_id = metrics.get("prompt_id")
+        if prompt_id:
+            _base.write_json(repo / rel / "metrics.json", metrics)
+            _base.write_jsonl(repo / rel / "transcript.jsonl", cycle["events"])
+            prompt_key = str(prompt_id)
+            previous = latest_by_prompt.get(prompt_key)
+            ordering = (
+                str(metrics.get("timestamp_end_utc") or ""),
+                str(metrics.get("cycle_key") or ""),
+            )
+            if previous is None or ordering > previous["ordering"]:
+                latest_by_prompt[prompt_key] = {"cycle": cycle, "ordering": ordering}
+
+        prompt_rows.append(
+            {
+                "prompt_id": prompt_id,
+                "chat_id": metrics["chat_id"],
+                "cycle_key": metrics["cycle_key"],
+                "native_session_id": metrics["native_session_id"],
+                "timestamp_end_utc": metrics.get("timestamp_end_utc"),
+                "status": metrics.get("status"),
+                "path": rel.as_posix(),
+            }
+        )
+
+    # Preserve the legacy flat path as an explicit latest-cycle alias so callers
+    # that have not migrated to the cycle-aware index continue to work.
+    for prompt_id, selected in latest_by_prompt.items():
+        cycle = selected["cycle"]
+        flat = Path("prompts") / prompt_id
+        _base.write_json(repo / flat / "metrics.json", cycle["metrics"])
+        _base.write_jsonl(repo / flat / "transcript.jsonl", cycle["events"])
+
+    sorted_rows = sorted(
+        prompt_rows,
+        key=lambda row: (row.get("timestamp_end_utc") or "", str(row.get("cycle_key"))),
+    )
+    _base.write_jsonl(repo / "index/prompts.jsonl", sorted_rows)
+
+    latest_path = repo / "index/latest.json"
+    if latest_path.is_file():
+        latest = json.loads(latest_path.read_text(encoding="utf-8"))
+        if isinstance(latest, dict):
+            latest["latest_prompt"] = sorted_rows[-1] if sorted_rows else None
+            _base.write_json(latest_path, latest)
+
+
 _base.VERSION = VERSION
 _base._legacy_parse_session = _legacy_parse_session_with_goal_recovery
 _base._recover_completed_goal_aborts = _recover_completed_goal_aborts
 _base._goal_completion = _goal_completion
 _base.parse_session = parse_session
+_base.export_repo = export_repo
 _base.legacy.parse_session = parse_session
+_base.legacy.export_repo = export_repo
 
 
 if __name__ == "__main__":
