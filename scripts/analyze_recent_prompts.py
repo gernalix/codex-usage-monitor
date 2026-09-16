@@ -16,6 +16,13 @@ CONTEXT_GUARD_RE = re.compile(
     r"(?is)(?:non\s+(?:rileggere|leggere)|do\s+not\s+(?:re-?read|read)).{0,240}"
     r"(?:MEMORY\.md|roadmap|README|spiegazioni|MegaVault)",
 )
+PUSH_REJECT_RE = re.compile(
+    r"(?is)(?:\[rejected\].{0,240}(?:fetch first|non-fast-forward)|"
+    r"Updates were rejected because the remote contains work)",
+)
+ROADMAP_GUARD_MISMATCH_RE = re.compile(
+    r"(?is)selected\s*=\s*([A-Za-z0-9_.-]+).{0,240}requested\s*=\s*([A-Za-z0-9_.-]+)",
+)
 
 
 def _is_tool_call(event: dict[str, Any]) -> bool:
@@ -75,6 +82,29 @@ def explicit_context_guard(events: list[dict[str, Any]]) -> bool:
     )
 
 
+def operational_conflicts(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Surface repo/roadmap races that force avoidable rebase or bookkeeping work."""
+    push_rejections = 0
+    guard_mismatches: list[dict[str, str]] = []
+    rebase_commands = 0
+    for event in events:
+        text = event.get("content_text")
+        if _is_tool_output(event) and isinstance(text, str):
+            if PUSH_REJECT_RE.search(text):
+                push_rejections += 1
+            for match in ROADMAP_GUARD_MISMATCH_RE.finditer(text):
+                guard_mismatches.append({"selected": match.group(1), "requested": match.group(2)})
+        if _is_tool_call(event) and event.get("tool_name") in {"exec_command", "shell"}:
+            command = base._command_text(event)
+            if re.search(r"\bgit\s+rebase\b", command):
+                rebase_commands += 1
+    return {
+        "push_rejection_count": push_rejections,
+        "git_rebase_command_count": rebase_commands,
+        "roadmap_guard_mismatches": guard_mismatches,
+    }
+
+
 def enrich(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:
     result = base.analyze(metrics, events)
     calls = int(result.get("tool_call_count") or 0)
@@ -88,6 +118,7 @@ def enrich(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, A
     calls_per_roundtrip = (calls / roundtrips) if roundtrips else None
     roundtrips_per_minute = (roundtrips * 60.0 / duration) if duration > 0 else None
     guard = explicit_context_guard(events)
+    conflicts = operational_conflicts(events)
 
     findings = list(result.get("findings") or [])
     if roundtrips >= 20 and fresh < 10_000:
@@ -123,6 +154,30 @@ def enrich(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, A
                 "count": int(result.get("avoidable_context_read_count") or 0),
             }
         )
+    if conflicts["push_rejection_count"]:
+        findings.append(
+            {
+                "code": "remote_advanced_during_task",
+                "count": conflicts["push_rejection_count"],
+                "rebases": conflicts["git_rebase_command_count"],
+            }
+        )
+    if conflicts["push_rejection_count"] and conflicts["git_rebase_command_count"]:
+        findings.append(
+            {
+                "code": "push_reject_rebase_churn",
+                "push_rejections": conflicts["push_rejection_count"],
+                "rebases": conflicts["git_rebase_command_count"],
+            }
+        )
+    if conflicts["roadmap_guard_mismatches"]:
+        findings.append(
+            {
+                "code": "roadmap_guard_order_mismatch",
+                "count": len(conflicts["roadmap_guard_mismatches"]),
+                "examples": conflicts["roadmap_guard_mismatches"][:3],
+            }
+        )
 
     result.update(
         {
@@ -132,6 +187,7 @@ def enrich(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, A
             "failed_command_count": len(failures),
             "failed_commands": failures,
             "explicit_context_guard": guard,
+            **conflicts,
             "findings": findings,
         }
     )
