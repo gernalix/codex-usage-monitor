@@ -36,3 +36,4 @@ jobs:
           tests.test_uptime_kuma_push
           tests.test_prompt_efficiency
           tests.test_prompt_efficiency_failures
+          tests.test_recent_prompt_efficiency
