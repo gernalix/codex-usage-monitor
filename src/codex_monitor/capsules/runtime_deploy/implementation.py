@@ -190,7 +190,7 @@ def deploy(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Deploy codex-usage-monitor publisher runtime")
-    parser.add_argument("--source", default=str(Path(__file__).resolve().parent))
+    parser.add_argument("--source", default=str(Path(__file__).resolve().parents[4]))
     parser.add_argument("--runtime-root", default=str(DEFAULT_RUNTIME_ROOT))
     parser.add_argument(
         "--skip-fetch",

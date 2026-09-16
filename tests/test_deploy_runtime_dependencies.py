@@ -9,6 +9,12 @@ from codex_monitor.capsules.runtime_deploy import implementation as deploy_runti
 
 
 class DeployRuntimeDependenciesTest(unittest.TestCase):
+    def test_main_defaults_source_to_repository_root(self) -> None:
+        result = {"commit": "abc123", "release": "/runtime/release", "current": "/runtime/current"}
+        with mock.patch.object(deploy_runtime, "deploy", return_value=result) as deploy_mock:
+            self.assertEqual(deploy_runtime.main(["--skip-fetch"]), 0)
+        self.assertEqual(Path(deploy_runtime.__file__).resolve().parents[4], deploy_mock.call_args.args[0])
+
     def test_publisher_base_module_is_deployed(self) -> None:
         self.assertIn("codex_usage_publisher.py", deploy_runtime.RUNTIME_FILES)
         self.assertIn("codex_usage_publisher_base.py", deploy_runtime.RUNTIME_FILES)
