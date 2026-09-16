@@ -12,7 +12,7 @@ import codex_usage_publisher_legacy as legacy
 from codex_usage_publisher_legacy import *  # noqa: F401,F403
 
 
-VERSION = "2026.09.15"
+VERSION = "2026.09.16"
 FINGERPRINT_SCHEMA = 2
 GUARD_METADATA_KEYS = {"repo_project", "repo_paths", "repo_projects", "repo_write_projects", "repo_path_kinds"}
 _GOAL_PREFIX = '<codex_internal_context source="goal">'
@@ -25,6 +25,7 @@ _legacy_export_repo = legacy.export_repo
 _legacy_send_batch_telegram = legacy.send_batch_telegram
 _legacy_command_run = legacy.command_run
 _legacy_status_from_final = legacy.status_from_final
+_legacy_chat_metrics = legacy.chat_metrics
 _should_export = False
 _notify_cycle_objects: set[int] = set()
 _guard_candidate_cycles: dict[str, dict[str, Any]] = {}
@@ -71,6 +72,14 @@ def status_from_final(text: str) -> str:
     if match:
         return match.group(1).upper()
     return _legacy_status_from_final(text)
+
+
+def chat_metrics(chat_id: int, cycles: list[dict[str, Any]]) -> dict[str, Any]:
+    metrics = _legacy_chat_metrics(chat_id, cycles)
+    metrics["prompt_ids"] = _stable_unique(
+        [str(prompt_id) for prompt_id in metrics.get("prompt_ids") or [] if prompt_id]
+    )
+    return metrics
 
 
 def connect_state(state_dir: Path) -> sqlite3.Connection:
@@ -478,7 +487,10 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
         if not prompt_id:
             if final_prompt_id:
                 prompt_id = final_prompt_id
-            elif prompt_text.lstrip().startswith(_GOAL_PREFIX) and last_prompt_id:
+            elif last_prompt_id:
+                # Native Codex task continuations can be a goal-context turn, an
+                # acknowledgement such as "autorizzo", or an automatic resume.
+                # Keep the active PROMPT_ID until a later cycle provides a new one.
                 prompt_id = last_prompt_id
             if prompt_id:
                 metrics["prompt_id"] = prompt_id
@@ -544,6 +556,7 @@ def _install_runtime() -> None:
     legacy.connect_state = connect_state
     legacy.prompt_id_from_text = prompt_id_from_text
     legacy.status_from_final = status_from_final
+    legacy.chat_metrics = chat_metrics
     legacy.parse_session = parse_session
     legacy.export_repo = export_repo
     legacy.send_batch_telegram = globals()["send_batch_telegram"]
