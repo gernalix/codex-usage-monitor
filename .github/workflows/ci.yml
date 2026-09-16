@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run deterministic unit suite
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          python3 scripts/verify_repo.py
+          tests.test_parsing
+          tests.test_session_archive
+          tests.test_session_archive_incremental
+          tests.test_usage_publisher
+          tests.test_usage_publisher_regressions
+          tests.test_chat_dump_publisher
+          tests.test_quota_notification_policy
+          tests.test_uptime_kuma_push
