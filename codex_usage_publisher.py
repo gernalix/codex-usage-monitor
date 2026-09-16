@@ -11,7 +11,7 @@ import codex_usage_publisher_base as _base
 from codex_usage_publisher_base import *  # noqa: F401,F403
 
 
-VERSION = "2026.09.16.2"
+VERSION = "2026.09.16.3"
 _ORIGINAL_LEGACY_PARSE_SESSION = _base._legacy_parse_session
 _BASE_PARSE_SESSION = _base.parse_session
 
@@ -89,7 +89,7 @@ def _recover_completed_goal_aborts(
 
         if subtype in {"function_call_output", "custom_tool_call_output"}:
             text = str(event.get("content_text") or "")
-            if current["waiting_for_goal_objective_output"] and not current["prompt_id"]:
+            if current["waiting_for_goal_objective_output"]:
                 prompt_id = _base._literal_prompt_id(text)
                 if prompt_id:
                     current["prompt_id"] = prompt_id
