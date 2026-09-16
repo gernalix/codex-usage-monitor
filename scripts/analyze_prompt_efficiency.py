@@ -28,7 +28,7 @@ TRUNCATED_TOOL_OUTPUT_RE = re.compile(r"(?:warning:\s*)?truncated output|\.\.\.\
 PROCESS_EXIT_RE = re.compile(r"\bProcess exited with code\s+(-?\d+)\b", re.I)
 SQLITE_READONLY_RE = re.compile(r"attempt to write a readonly database", re.I)
 PYTHON_IMPORT_RE = re.compile(r"ModuleNotFoundError:\s*No module named", re.I)
-SCHEMA_PROBE_RE = re.compile(r"(?:\bpragma\s+table_info\s*\(|(?:^|\s)\.tables(?:\s|$))", re.I)
+SCHEMA_PROBE_RE = re.compile(r"(?:\bpragma\s+table_info\s*\(|(?:^|[\s'\"])\.tables(?:[\s'\"]|$))", re.I)
 REPORTED_STATUS_RE = re.compile(
     r"(?im)^\s*STATUS\s*:\s*(PASS|FAIL|BLOCKED|PARTIAL|WAITING_FOR_EVENT|BLOCKED_REPO_PUBLIC)\b"
 )
