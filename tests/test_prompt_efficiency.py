@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import sqlite3
+import tempfile
 import unittest
 
 from scripts import analyze_prompt_efficiency as efficiency
@@ -125,6 +128,104 @@ class PromptEfficiencyTests(unittest.TestCase):
         self.assertIn("avoidable_context_reads", codes)
         self.assertIn("roundtrip_heavy_cached_session", codes)
         self.assertNotIn("high_tool_call_count", codes)
+
+    def test_aggregate_attempts_reports_retry_roundtrip_churn(self) -> None:
+        rows = [
+            {
+                "prompt_id": "364208",
+                "completion_state": "task_complete",
+                "first_timestamp_utc": "2026-09-16T03:08:07Z",
+                "model": "gpt-5.5",
+                "reasoning_effort": "low",
+                "total_tokens": 35821,
+                "input_tokens": 35440,
+                "cached_input_tokens": 33152,
+                "uncached_input_tokens": 2288,
+                "output_tokens": 381,
+                "reasoning_output_tokens": 163,
+                "tool_call_count": 13,
+                "duration_seconds": 60.0,
+            },
+            {
+                "prompt_id": "364208",
+                "completion_state": "task_complete",
+                "first_timestamp_utc": "2026-09-16T03:33:12Z",
+                "model": "gpt-5.5",
+                "reasoning_effort": "low",
+                "total_tokens": 40667,
+                "input_tokens": 40242,
+                "cached_input_tokens": 39296,
+                "uncached_input_tokens": 946,
+                "output_tokens": 425,
+                "reasoning_output_tokens": 158,
+                "tool_call_count": 16,
+                "duration_seconds": 182.0,
+            },
+            {
+                "prompt_id": "364208",
+                "completion_state": "task_complete",
+                "first_timestamp_utc": "2026-09-16T03:51:24Z",
+                "model": "gpt-5.5",
+                "reasoning_effort": "low",
+                "total_tokens": 32694,
+                "input_tokens": 32473,
+                "cached_input_tokens": 31104,
+                "uncached_input_tokens": 1369,
+                "output_tokens": 221,
+                "reasoning_output_tokens": 0,
+                "tool_call_count": 10,
+                "duration_seconds": 89.19,
+            },
+        ]
+
+        result = efficiency.aggregate_attempts(rows)
+        codes = {item["code"] for item in result["findings"]}
+
+        self.assertEqual(result["attempt_count"], 3)
+        self.assertEqual(result["total_tokens"], 109182)
+        self.assertEqual(result["input_tokens"], 108155)
+        self.assertEqual(result["cached_input_tokens"], 103552)
+        self.assertEqual(result["uncached_input_tokens"], 4603)
+        self.assertEqual(result["output_tokens"], 1027)
+        self.assertEqual(result["reasoning_output_tokens"], 321)
+        self.assertEqual(result["tool_call_count"], 39)
+        self.assertAlmostEqual(result["duration_seconds"], 331.19)
+        self.assertAlmostEqual(result["cache_ratio"], 103552 / 108155)
+        self.assertIn("multiple_prompt_attempts", codes)
+        self.assertIn("multi_attempt_roundtrip_churn", codes)
+
+    def test_load_prompt_attempts_excludes_incomplete_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "task_costs.sqlite"
+            with sqlite3.connect(db) as con:
+                con.execute(
+                    """
+                    CREATE TABLE prompt_costs (
+                        source_path TEXT NOT NULL,
+                        prompt_seq INTEGER NOT NULL,
+                        prompt_id TEXT NOT NULL,
+                        completion_state TEXT,
+                        first_timestamp_utc TEXT,
+                        total_tokens INTEGER,
+                        PRIMARY KEY(source_path, prompt_seq)
+                    )
+                    """
+                )
+                con.executemany(
+                    "INSERT INTO prompt_costs VALUES (?,?,?,?,?,?)",
+                    [
+                        ("b", 1, "364208", "task_complete", "2026-09-16T03:33:12Z", 40667),
+                        ("a", 1, "364208", "task_complete", "2026-09-16T03:08:07Z", 35821),
+                        ("c", 1, "364208", "eof_incomplete", "2026-09-16T03:40:00Z", 100),
+                        ("d", 1, "999999", "task_complete", "2026-09-16T03:50:00Z", 50),
+                    ],
+                )
+                con.commit()
+
+            rows = efficiency.load_prompt_attempts(db, "364208")
+
+            self.assertEqual([row["source_path"] for row in rows], ["a", "b"])
+            self.assertEqual([row["total_tokens"] for row in rows], [35821, 40667])
 
     def test_serial_scoped_adb_install_is_not_flagged(self) -> None:
         result = efficiency.analyze(
