@@ -12,7 +12,7 @@ import codex_usage_publisher_legacy as legacy
 from codex_usage_publisher_legacy import *  # noqa: F401,F403
 
 
-VERSION = "2026.09.11"
+VERSION = "2026.09.15"
 FINGERPRINT_SCHEMA = 2
 GUARD_METADATA_KEYS = {"repo_project", "repo_paths", "repo_projects", "repo_write_projects", "repo_path_kinds"}
 _GOAL_PREFIX = '<codex_internal_context source="goal">'
@@ -272,6 +272,16 @@ def _json_obj(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _stable_unique(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
 def _explicit_paths_from_payload(payload: dict[str, Any]) -> list[str]:
     args = _json_obj(payload.get("arguments")) or _json_obj(payload.get("input"))
     paths: list[str] = []
@@ -284,7 +294,7 @@ def _explicit_paths_from_payload(payload: dict[str, Any]) -> list[str]:
         value = target.get("path")
         if isinstance(value, str) and value.startswith("/"):
             paths.append(value)
-    return paths
+    return _stable_unique(paths)
 
 
 def _tool_path_kind(payload: dict[str, Any]) -> str:
@@ -340,7 +350,50 @@ def _exec_write_paths_from_event(event: dict[str, Any]) -> list[str]:
         value = args.get(key)
         if isinstance(value, str) and value.startswith("/"):
             paths.append(value)
-    return paths
+    return _stable_unique(paths)
+
+
+def _apply_patch_write_paths_from_event(
+    event: dict[str, Any],
+    candidate_roots: list[Path],
+    fallback_cwd: str | None,
+) -> list[str]:
+    if event.get("tool_name") != "apply_patch":
+        return []
+    raw = event.get("content_text")
+    args = _json_obj(raw)
+    patch = args.get("patch") if isinstance(args.get("patch"), str) else raw if isinstance(raw, str) else ""
+    if not patch:
+        return []
+
+    bases: list[Path] = []
+    for key in ("workdir", "cwd"):
+        value = args.get(key)
+        if isinstance(value, str) and value.startswith("/"):
+            bases.append(Path(value).expanduser())
+    bases.extend(candidate_roots)
+    if fallback_cwd:
+        bases.append(Path(fallback_cwd).expanduser())
+    deduped_bases = [Path(value) for value in _stable_unique([str(path) for path in bases])]
+
+    paths: list[str] = []
+    for match in re.finditer(r"(?m)^\*\*\* (?:Add|Update|Delete) File: (.+?)\s*$", patch):
+        raw_path = match.group(1).strip()
+        path = Path(raw_path).expanduser()
+        if path.is_absolute():
+            paths.append(str(path))
+            continue
+
+        existing = [base / path for base in deduped_bases if (base / path).exists()]
+        if existing:
+            paths.append(str(existing[0]))
+            continue
+
+        parent_matches = [base / path for base in deduped_bases if (base / path).parent.exists()]
+        if len(parent_matches) == 1:
+            paths.append(str(parent_matches[0]))
+
+    return _stable_unique(paths)
 
 
 def _fingerprint(cycle: dict[str, Any]) -> str:
@@ -362,21 +415,30 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
 
     for cycle in cycles:
         metrics = cycle["metrics"]
-        explicit_repos = [str(repo) for repo in _repo_roots(list(metrics.get("repo_paths") or []))]
-        exec_write_paths: list[str] = []
+        raw_repo_paths = _stable_unique([str(value) for value in (metrics.get("repo_paths") or []) if value])
+        metrics["repo_paths"] = raw_repo_paths
+        candidate_roots = _repo_roots(raw_repo_paths)
+        explicit_repos = [str(repo) for repo in candidate_roots]
+        inferred_write_paths: list[str] = []
         for event in cycle.get("events") or []:
-            if isinstance(event, dict):
-                exec_write_paths.extend(_exec_write_paths_from_event(event))
-        write_paths = list(metrics.get("repo_write_paths") or []) + exec_write_paths
+            if not isinstance(event, dict):
+                continue
+            inferred_write_paths.extend(_exec_write_paths_from_event(event))
+            inferred_write_paths.extend(
+                _apply_patch_write_paths_from_event(event, candidate_roots, metrics.get("repo_project"))
+            )
+        write_paths = _stable_unique(list(metrics.get("repo_write_paths") or []) + inferred_write_paths)
         write_repos = [str(repo) for repo in _repo_roots(write_paths)]
         if explicit_repos:
             metrics["repo_projects"] = explicit_repos
         else:
             fallback = metrics.get("repo_project")
             metrics["repo_projects"] = [str(repo) for repo in _repo_roots([fallback] if isinstance(fallback, str) else [])]
-        metrics["repo_write_projects"] = sorted(set(write_repos))
+        metrics["repo_write_projects"] = write_repos
         metrics.pop("repo_write_paths", None)
-        if metrics["repo_projects"]:
+        if len(write_repos) == 1:
+            metrics["repo_project"] = write_repos[0]
+        elif metrics["repo_projects"]:
             metrics["repo_project"] = metrics["repo_projects"][0]
         metrics["status"] = status_from_final(str(metrics.get("final_response_redacted") or ""))
         prompt_id = metrics.get("prompt_id")
