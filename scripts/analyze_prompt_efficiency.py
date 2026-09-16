@@ -20,7 +20,8 @@ ROADMAP_META_MARKERS = (
 )
 ROUNDTRIP_HEAVY_TOOL_CALL_THRESHOLD = 30
 HIGH_TOOL_CALL_RATE_THRESHOLD = 8.0
-LARGE_TOOL_OUTPUT_TOKEN_THRESHOLD = 5_000
+LARGE_TOOL_OUTPUT_TOKEN_THRESHOLD = 3_000
+VERBOSE_SUCCESS_OUTPUT_TOKEN_THRESHOLD = 2_000
 DEFAULT_COST_DB = Path.home() / ".local/share/codex-session-archive/index/task_costs.sqlite"
 ADB_INSTALL_RE = re.compile(r"\badb\s+(?P<before_install>[^;&|\n]*?)\binstall\b", re.I)
 TOOL_OUTPUT_TOKEN_RE = re.compile(r"\boriginal token count:\s*(\d+)\b", re.I)
@@ -29,6 +30,9 @@ PROCESS_EXIT_RE = re.compile(r"\bProcess exited with code\s+(-?\d+)\b", re.I)
 SQLITE_READONLY_RE = re.compile(r"attempt to write a readonly database", re.I)
 PYTHON_IMPORT_RE = re.compile(r"ModuleNotFoundError:\s*No module named", re.I)
 SCHEMA_PROBE_RE = re.compile(r"(?:\bpragma\s+table_info\s*\(|(?:^|[\s'\"])\.tables(?:[\s'\"]|$))", re.I)
+GRADLE_SUCCESS_RE = re.compile(r"\bBUILD SUCCESSFUL\b", re.I)
+TRACE_ARTIFACT_RE = re.compile(r"trace_processor|\.pftrace\b", re.I)
+TRACE_DISCOVERY_RE = re.compile(r"\brg\s+--files\b|\bfind\b|\bwhich\b|\bls\b", re.I)
 REPORTED_STATUS_RE = re.compile(
     r"(?im)^\s*STATUS\s*:\s*(PASS|FAIL|BLOCKED|PARTIAL|WAITING_FOR_EVENT|BLOCKED_REPO_PUBLIC)\b"
 )
@@ -116,6 +120,12 @@ def _roadmap_meta_read(command: str) -> bool:
     return any(marker in command for marker in ROADMAP_META_MARKERS)
 
 
+def _trace_artifact_discovery(command: str) -> bool:
+    if "android_perfetto_query.py --help" in command:
+        return True
+    return bool(TRACE_ARTIFACT_RE.search(command) and TRACE_DISCOVERY_RE.search(command))
+
+
 def _tool_output_token_count(event: dict[str, Any]) -> int | None:
     if event.get("subtype") not in {"function_call_output", "custom_tool_call_output"}:
         return None
@@ -131,6 +141,14 @@ def _truncated_tool_output(event: dict[str, Any]) -> bool:
         return False
     text = event.get("content_text")
     return bool(isinstance(text, str) and TRUNCATED_TOOL_OUTPUT_RE.search(text))
+
+
+def _verbose_gradle_success_output(event: dict[str, Any]) -> bool:
+    text = event.get("content_text")
+    if not isinstance(text, str) or not GRADLE_SUCCESS_RE.search(text):
+        return False
+    count = _tool_output_token_count(event)
+    return count is not None and count >= VERBOSE_SUCCESS_OUTPUT_TOKEN_THRESHOLD
 
 
 def _tool_failure_counts(events: list[dict[str, Any]]) -> dict[str, int]:
@@ -186,6 +204,7 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
     avoidable_context_reads = memory_reads + roadmap_meta_reads
     unscoped_adb_installs = sum(_unscoped_adb_installs(command) for command in commands)
     trace_processor_commands = sum("trace_processor" in command for command in commands)
+    trace_artifact_discovery_commands = sum(_trace_artifact_discovery(command) for command in commands)
     broad_boot_journal_scans = sum(_broad_boot_journal_scans(command) for command in commands)
     schema_probe_commands = sum(bool(SCHEMA_PROBE_RE.search(command)) for command in commands)
     failure_counts = _tool_failure_counts(events)
@@ -197,6 +216,7 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
     ]
     large_tool_outputs = [count for count in tool_output_counts if count >= LARGE_TOOL_OUTPUT_TOKEN_THRESHOLD]
     truncated_tool_outputs = sum(_truncated_tool_output(event) for event in events)
+    verbose_gradle_success_outputs = sum(_verbose_gradle_success_output(event) for event in events)
 
     repeated = [
         {"command": command, "count": count}
@@ -217,8 +237,8 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
         findings.append({"code": "repeated_exact_commands", "count": sum(item["count"] - 1 for item in repeated)})
     if unscoped_adb_installs:
         findings.append({"code": "unscoped_adb_install", "count": unscoped_adb_installs})
-    if trace_processor_commands >= 3:
-        findings.append({"code": "trace_processor_discovery_churn", "count": trace_processor_commands})
+    if trace_artifact_discovery_commands >= 2:
+        findings.append({"code": "trace_processor_discovery_churn", "count": trace_artifact_discovery_commands})
     if broad_boot_journal_scans:
         findings.append({"code": "broad_boot_journal_scans", "count": broad_boot_journal_scans})
     if schema_probe_commands >= 2:
@@ -239,6 +259,8 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
         )
     if truncated_tool_outputs:
         findings.append({"code": "truncated_tool_outputs", "count": truncated_tool_outputs})
+    if verbose_gradle_success_outputs:
+        findings.append({"code": "verbose_gradle_success_output", "count": verbose_gradle_success_outputs})
 
     tool_calls = int(metrics.get("tool_call_count") or 0)
     input_tokens = int(metrics.get("input_tokens") or 0)
@@ -301,6 +323,7 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
         "avoidable_context_read_count": avoidable_context_reads,
         "unscoped_adb_install_count": unscoped_adb_installs,
         "trace_processor_command_count": trace_processor_commands,
+        "trace_artifact_discovery_count": trace_artifact_discovery_commands,
         "broad_boot_journal_scan_count": broad_boot_journal_scans,
         "schema_probe_command_count": schema_probe_commands,
         "failed_command_count": failure_counts["failed_commands"],
@@ -310,6 +333,7 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
         "max_tool_output_tokens": max(tool_output_counts, default=0),
         "large_tool_output_count": len(large_tool_outputs),
         "truncated_tool_output_count": truncated_tool_outputs,
+        "verbose_gradle_success_output_count": verbose_gradle_success_outputs,
         "stored_status": stored_status,
         "reported_status": reported_status,
         "repeated_exact_commands": repeated,
