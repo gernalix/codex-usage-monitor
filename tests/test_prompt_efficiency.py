@@ -129,6 +129,69 @@ class PromptEfficiencyTests(unittest.TestCase):
         self.assertIn("roundtrip_heavy_cached_session", codes)
         self.assertNotIn("high_tool_call_count", codes)
 
+    def test_814627_shape_flags_large_output_journal_and_status_mismatch(self) -> None:
+        metrics = {
+            "prompt_id": "814627",
+            "status": "UNKNOWN",
+            "total_tokens": 92133,
+            "input_tokens": 91346,
+            "cached_input_tokens": 90496,
+            "uncached_input_tokens": 850,
+            "output_tokens": 787,
+            "reasoning_output_tokens": 386,
+            "tool_call_count": 35,
+            "tool_calls_by_type": {"exec_command": 32, "apply_patch": 3},
+            "duration_seconds": 223.991,
+            "repo_paths": ["/repo"],
+            "final_response_redacted": "CAUSE:\nnot yet captured\n\nSTATUS:\nWAITING_FOR_EVENT",
+        }
+        events = [
+            {
+                "tool_name": "exec_command",
+                "content_text": json.dumps({"cmd": "rg -n power ~/.codex/memories/MEMORY.md"}),
+            },
+            {
+                "tool_name": "exec_command",
+                "content_text": json.dumps(
+                    {
+                        "cmd": "journalctl -b -u tuned-ppd.service --no-pager; journalctl -b --no-pager | rg -i 'power|profile|thermal'"
+                    }
+                ),
+            },
+            {
+                "subtype": "function_call_output",
+                "content_text": "Chunk ID: a\nOriginal token count: 13705\nWarning: truncated output (original token count: 13705)\nOutput:\n...",
+            },
+            {
+                "subtype": "function_call_output",
+                "content_text": "Chunk ID: b\nOriginal token count: 6834\nOutput:\nfocused tuned log",
+            },
+        ]
+
+        result = efficiency.analyze(metrics, events)
+        codes = {item["code"] for item in result["findings"]}
+
+        self.assertAlmostEqual(90496 / 91346, result["cache_ratio"])
+        self.assertAlmostEqual(35 * 60 / 223.991, result["tool_calls_per_minute"])
+        self.assertEqual(1, result["memory_read_count"])
+        self.assertEqual(1, result["broad_boot_journal_scan_count"])
+        self.assertEqual(2, result["large_tool_output_count"])
+        self.assertEqual(13705, result["max_tool_output_tokens"])
+        self.assertEqual(20539, result["tool_output_tokens_observed"])
+        self.assertEqual(1, result["truncated_tool_output_count"])
+        self.assertEqual("UNKNOWN", result["stored_status"])
+        self.assertEqual("WAITING_FOR_EVENT", result["reported_status"])
+        self.assertEqual({"exec_command": 32, "apply_patch": 3}, result["tool_calls_by_type"])
+        self.assertIn("memory_reads", codes)
+        self.assertIn("broad_boot_journal_scans", codes)
+        self.assertIn("large_tool_outputs", codes)
+        self.assertIn("truncated_tool_outputs", codes)
+        self.assertIn("high_tool_call_rate", codes)
+        self.assertIn("roundtrip_heavy_cached_session", codes)
+        self.assertIn("status_parse_mismatch", codes)
+        self.assertNotIn("high_tool_call_count", codes)
+        self.assertNotIn("high_uncached_input_tokens", codes)
+
     def test_aggregate_attempts_reports_retry_roundtrip_churn(self) -> None:
         rows = [
             {
