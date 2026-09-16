@@ -37,3 +37,4 @@ jobs:
           tests.test_prompt_efficiency
           tests.test_prompt_efficiency_failures
           tests.test_recent_prompt_efficiency
+          tests.test_analyze_published_prompt
