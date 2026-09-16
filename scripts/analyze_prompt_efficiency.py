@@ -19,8 +19,16 @@ ROADMAP_META_MARKERS = (
     "/codex-roadmap/STANDARD_PROMPT.md",
 )
 ROUNDTRIP_HEAVY_TOOL_CALL_THRESHOLD = 30
+HIGH_TOOL_CALL_RATE_THRESHOLD = 8.0
+LARGE_TOOL_OUTPUT_TOKEN_THRESHOLD = 5_000
 DEFAULT_COST_DB = Path.home() / ".local/share/codex-session-archive/index/task_costs.sqlite"
 ADB_INSTALL_RE = re.compile(r"\badb\s+(?P<before_install>[^;&|\n]*?)\binstall\b", re.I)
+TOOL_OUTPUT_TOKEN_RE = re.compile(r"\boriginal token count:\s*(\d+)\b", re.I)
+TRUNCATED_TOOL_OUTPUT_RE = re.compile(r"(?:warning:\s*)?truncated output|\.\.\.\s*\(truncated\)", re.I)
+REPORTED_STATUS_RE = re.compile(
+    r"(?im)^\s*STATUS\s*:\s*(PASS|FAIL|BLOCKED|PARTIAL|WAITING_FOR_EVENT|BLOCKED_REPO_PUBLIC)\b"
+)
+JOURNAL_SEGMENT_RE = re.compile(r"\bjournalctl\b(?P<args>[^;|\n]*)(?=[;|\n]|$)", re.I)
 
 
 def _json_obj(value: Any) -> dict[str, Any]:
@@ -104,6 +112,45 @@ def _roadmap_meta_read(command: str) -> bool:
     return any(marker in command for marker in ROADMAP_META_MARKERS)
 
 
+def _tool_output_token_count(event: dict[str, Any]) -> int | None:
+    if event.get("subtype") not in {"function_call_output", "custom_tool_call_output"}:
+        return None
+    text = event.get("content_text")
+    if not isinstance(text, str):
+        return None
+    match = TOOL_OUTPUT_TOKEN_RE.search(text)
+    return int(match.group(1)) if match else None
+
+
+def _truncated_tool_output(event: dict[str, Any]) -> bool:
+    if event.get("subtype") not in {"function_call_output", "custom_tool_call_output"}:
+        return False
+    text = event.get("content_text")
+    return bool(isinstance(text, str) and TRUNCATED_TOOL_OUTPUT_RE.search(text))
+
+
+def _broad_boot_journal_scans(command: str) -> int:
+    count = 0
+    for match in JOURNAL_SEGMENT_RE.finditer(command):
+        args = f" {match.group('args')} "
+        if not re.search(r"(?:^|\s)-b(?:\s|$)", args):
+            continue
+        if any(marker in args for marker in (" --since", " --until", " --lines", " -n ", " --cursor", " --after-cursor")):
+            continue
+        if re.search(r"(?:^|\s)(?:-u|--unit)(?:=|\s)", args):
+            continue
+        count += 1
+    return count
+
+
+def _reported_status(metrics: dict[str, Any]) -> str | None:
+    final = metrics.get("final_response_redacted")
+    if not isinstance(final, str):
+        return None
+    match = REPORTED_STATUS_RE.search(final)
+    return match.group(1).upper() if match else None
+
+
 def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:
     repo_paths = [str(value) for value in metrics.get("repo_paths") or []]
     unique_repo_paths = list(dict.fromkeys(repo_paths))
@@ -113,6 +160,15 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
     avoidable_context_reads = memory_reads + roadmap_meta_reads
     unscoped_adb_installs = sum(_unscoped_adb_installs(command) for command in commands)
     trace_processor_commands = sum("trace_processor" in command for command in commands)
+    broad_boot_journal_scans = sum(_broad_boot_journal_scans(command) for command in commands)
+
+    tool_output_counts = [
+        count
+        for event in events
+        if (count := _tool_output_token_count(event)) is not None
+    ]
+    large_tool_outputs = [count for count in tool_output_counts if count >= LARGE_TOOL_OUTPUT_TOKEN_THRESHOLD]
+    truncated_tool_outputs = sum(_truncated_tool_output(event) for event in events)
 
     repeated = [
         {"command": command, "count": count}
@@ -135,6 +191,18 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
         findings.append({"code": "unscoped_adb_install", "count": unscoped_adb_installs})
     if trace_processor_commands >= 3:
         findings.append({"code": "trace_processor_discovery_churn", "count": trace_processor_commands})
+    if broad_boot_journal_scans:
+        findings.append({"code": "broad_boot_journal_scans", "count": broad_boot_journal_scans})
+    if large_tool_outputs:
+        findings.append(
+            {
+                "code": "large_tool_outputs",
+                "count": len(large_tool_outputs),
+                "max_tokens": max(large_tool_outputs),
+            }
+        )
+    if truncated_tool_outputs:
+        findings.append({"code": "truncated_tool_outputs", "count": truncated_tool_outputs})
 
     tool_calls = int(metrics.get("tool_call_count") or 0)
     input_tokens = int(metrics.get("input_tokens") or 0)
@@ -146,9 +214,13 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
     cache_ratio = (cached / input_tokens) if input_tokens else None
     uncached_share = (uncached / input_tokens) if input_tokens else None
     tool_calls_per_minute = (tool_calls * 60.0 / duration) if duration > 0 else None
+    stored_status = str(metrics.get("status") or "").upper() or None
+    reported_status = _reported_status(metrics)
 
     if tool_calls >= 40:
         findings.append({"code": "high_tool_call_count", "value": tool_calls})
+    if tool_calls >= 20 and tool_calls_per_minute is not None and tool_calls_per_minute >= HIGH_TOOL_CALL_RATE_THRESHOLD:
+        findings.append({"code": "high_tool_call_rate", "value": round(tool_calls_per_minute, 3)})
     if uncached >= 50_000:
         findings.append({"code": "high_uncached_input_tokens", "value": uncached})
     if tool_calls >= ROUNDTRIP_HEAVY_TOOL_CALL_THRESHOLD and uncached < 10_000:
@@ -159,6 +231,18 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
                 "uncached_input_tokens": uncached,
             }
         )
+    if stored_status and reported_status and stored_status != reported_status:
+        findings.append(
+            {
+                "code": "status_parse_mismatch",
+                "stored_status": stored_status,
+                "reported_status": reported_status,
+            }
+        )
+
+    tool_calls_by_type = metrics.get("tool_calls_by_type")
+    if not isinstance(tool_calls_by_type, dict):
+        tool_calls_by_type = {}
 
     return {
         "prompt_id": metrics.get("prompt_id"),
@@ -172,6 +256,7 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
         "cache_ratio": cache_ratio,
         "uncached_input_share": uncached_share,
         "tool_call_count": tool_calls,
+        "tool_calls_by_type": tool_calls_by_type,
         "tool_calls_per_minute": tool_calls_per_minute,
         "repo_path_count": len(repo_paths),
         "unique_repo_path_count": len(unique_repo_paths),
@@ -180,6 +265,13 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
         "avoidable_context_read_count": avoidable_context_reads,
         "unscoped_adb_install_count": unscoped_adb_installs,
         "trace_processor_command_count": trace_processor_commands,
+        "broad_boot_journal_scan_count": broad_boot_journal_scans,
+        "tool_output_tokens_observed": sum(tool_output_counts),
+        "max_tool_output_tokens": max(tool_output_counts, default=0),
+        "large_tool_output_count": len(large_tool_outputs),
+        "truncated_tool_output_count": truncated_tool_outputs,
+        "stored_status": stored_status,
+        "reported_status": reported_status,
         "repeated_exact_commands": repeated,
         "findings": findings,
     }
