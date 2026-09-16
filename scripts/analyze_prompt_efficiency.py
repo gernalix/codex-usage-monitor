@@ -25,6 +25,10 @@ DEFAULT_COST_DB = Path.home() / ".local/share/codex-session-archive/index/task_c
 ADB_INSTALL_RE = re.compile(r"\badb\s+(?P<before_install>[^;&|\n]*?)\binstall\b", re.I)
 TOOL_OUTPUT_TOKEN_RE = re.compile(r"\boriginal token count:\s*(\d+)\b", re.I)
 TRUNCATED_TOOL_OUTPUT_RE = re.compile(r"(?:warning:\s*)?truncated output|\.\.\.\s*\(truncated\)", re.I)
+PROCESS_EXIT_RE = re.compile(r"\bProcess exited with code\s+(-?\d+)\b", re.I)
+SQLITE_READONLY_RE = re.compile(r"attempt to write a readonly database", re.I)
+PYTHON_IMPORT_RE = re.compile(r"ModuleNotFoundError:\s*No module named", re.I)
+SCHEMA_PROBE_RE = re.compile(r"(?:\bpragma\s+table_info\s*\(|(?:^|\s)\.tables(?:\s|$))", re.I)
 REPORTED_STATUS_RE = re.compile(
     r"(?im)^\s*STATUS\s*:\s*(PASS|FAIL|BLOCKED|PARTIAL|WAITING_FOR_EVENT|BLOCKED_REPO_PUBLIC)\b"
 )
@@ -129,6 +133,28 @@ def _truncated_tool_output(event: dict[str, Any]) -> bool:
     return bool(isinstance(text, str) and TRUNCATED_TOOL_OUTPUT_RE.search(text))
 
 
+def _tool_failure_counts(events: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {
+        "failed_commands": 0,
+        "sqlite_readonly_failures": 0,
+        "python_import_failures": 0,
+    }
+    for event in events:
+        if event.get("subtype") not in {"function_call_output", "custom_tool_call_output"}:
+            continue
+        text = event.get("content_text")
+        if not isinstance(text, str):
+            continue
+        match = PROCESS_EXIT_RE.search(text)
+        if match and int(match.group(1)) != 0:
+            counts["failed_commands"] += 1
+        if SQLITE_READONLY_RE.search(text):
+            counts["sqlite_readonly_failures"] += 1
+        if PYTHON_IMPORT_RE.search(text):
+            counts["python_import_failures"] += 1
+    return counts
+
+
 def _broad_boot_journal_scans(command: str) -> int:
     count = 0
     for match in JOURNAL_SEGMENT_RE.finditer(command):
@@ -161,6 +187,8 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
     unscoped_adb_installs = sum(_unscoped_adb_installs(command) for command in commands)
     trace_processor_commands = sum("trace_processor" in command for command in commands)
     broad_boot_journal_scans = sum(_broad_boot_journal_scans(command) for command in commands)
+    schema_probe_commands = sum(bool(SCHEMA_PROBE_RE.search(command)) for command in commands)
+    failure_counts = _tool_failure_counts(events)
 
     tool_output_counts = [
         count
@@ -193,6 +221,14 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
         findings.append({"code": "trace_processor_discovery_churn", "count": trace_processor_commands})
     if broad_boot_journal_scans:
         findings.append({"code": "broad_boot_journal_scans", "count": broad_boot_journal_scans})
+    if schema_probe_commands >= 2:
+        findings.append({"code": "schema_discovery_churn", "count": schema_probe_commands})
+    if failure_counts["failed_commands"] >= 3:
+        findings.append({"code": "failed_command_churn", "count": failure_counts["failed_commands"]})
+    if failure_counts["sqlite_readonly_failures"] >= 2:
+        findings.append({"code": "sqlite_readonly_retry", "count": failure_counts["sqlite_readonly_failures"]})
+    if failure_counts["python_import_failures"]:
+        findings.append({"code": "python_import_retry", "count": failure_counts["python_import_failures"]})
     if large_tool_outputs:
         findings.append(
             {
@@ -266,6 +302,10 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
         "unscoped_adb_install_count": unscoped_adb_installs,
         "trace_processor_command_count": trace_processor_commands,
         "broad_boot_journal_scan_count": broad_boot_journal_scans,
+        "schema_probe_command_count": schema_probe_commands,
+        "failed_command_count": failure_counts["failed_commands"],
+        "sqlite_readonly_failure_count": failure_counts["sqlite_readonly_failures"],
+        "python_import_failure_count": failure_counts["python_import_failures"],
         "tool_output_tokens_observed": sum(tool_output_counts),
         "max_tool_output_tokens": max(tool_output_counts, default=0),
         "large_tool_output_count": len(large_tool_outputs),
