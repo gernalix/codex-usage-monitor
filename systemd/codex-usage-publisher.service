@@ -1,5 +1,5 @@
 [Unit]
-Description=Publish Codex final-response usage artifacts and complete chat dumps
+Description=Publish Codex usage, chat dumps, and GitHub Actions incident state
 Wants=network-online.target
 After=network-online.target
 
@@ -9,6 +9,7 @@ Environment=PYTHONUNBUFFERED=1
 WorkingDirectory=/home/daniele/.local/lib/codex-usage-monitor/current
 ExecStart=/usr/bin/python3 /home/daniele/.local/lib/codex-usage-monitor/current/codex_usage_publisher.py run
 ExecStart=/usr/bin/python3 /home/daniele/.local/lib/codex-usage-monitor/current/codex_chat_dump_publisher.py run
+ExecStart=/usr/bin/python3 /home/daniele/.local/lib/codex-usage-monitor/current/github_actions_watch.py run
 TimeoutStartSec=1800
 NoNewPrivileges=true
 PrivateTmp=true
