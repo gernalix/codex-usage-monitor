@@ -11,7 +11,7 @@ import codex_usage_publisher_base as _base
 from codex_usage_publisher_base import *  # noqa: F401,F403
 
 
-VERSION = "2026.09.16.4"
+VERSION = "2026.09.16.5"
 _ORIGINAL_LEGACY_PARSE_SESSION = _base._legacy_parse_session
 _BASE_PARSE_SESSION = _base.parse_session
 _BASE_EXPORT_REPO = _base.export_repo
@@ -260,6 +260,14 @@ def _stable_prompt_dir(metrics: dict[str, Any]) -> Path:
     return Path("prompts/unassigned") / cycle_key
 
 
+def _stable_layout_missing(repo: Path, cycles: list[dict[str, Any]]) -> bool:
+    return any(
+        cycle["metrics"].get("prompt_id")
+        and not (repo / _stable_prompt_dir(cycle["metrics"]) / "metrics.json").is_file()
+        for cycle in cycles
+    )
+
+
 def export_repo(
     repo: Path,
     cycles: list[dict[str, Any]],
@@ -270,10 +278,12 @@ def export_repo(
 
     The historical flat `prompts/<PROMPT_ID>/metrics.json` and transcript remain
     as a compatibility alias for the latest cycle, while the prompt index points
-    at immutable `cycles/<cycle_key>` paths.
+    at immutable `cycles/<cycle_key>` paths. A missing stable layout forces a
+    one-time backfill even when no source cycle changed in this publisher run.
     """
+    migration_needed = _stable_layout_missing(repo, cycles)
     _BASE_EXPORT_REPO(repo, cycles, chat_events_by_id, quota_db)
-    if not _base._should_export:
+    if not _base._should_export and not migration_needed:
         return
 
     prompt_rows: list[dict[str, Any]] = []
