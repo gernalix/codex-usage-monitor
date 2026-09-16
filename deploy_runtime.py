@@ -17,6 +17,7 @@ RUNTIME_FILES = (
     "codex_chat_dump_publisher.py",
     "codex_session_archive.py",
     "codex_usage_monitor.py",
+    "github_actions_watch.py",
 )
 
 
