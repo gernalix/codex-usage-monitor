@@ -16,11 +16,11 @@ def call(command: str) -> dict[str, object]:
     }
 
 
-def output(code: int = 0) -> dict[str, object]:
+def output(code: int = 0, text: str = "value") -> dict[str, object]:
     return {
         "subtype": "function_call_output",
         "tool_name": None,
-        "content_text": f"Chunk ID: x\nProcess exited with code {code}\nOutput:\nvalue",
+        "content_text": f"Chunk ID: x\nProcess exited with code {code}\nOutput:\n{text}",
     }
 
 
@@ -107,6 +107,43 @@ class RecentPromptEfficiencyTests(unittest.TestCase):
         codes = {item["code"] for item in result["findings"]}
         self.assertTrue(result["explicit_context_guard"])
         self.assertIn("explicit_context_guard_violation", codes)
+
+    def test_enrich_detects_remote_advance_and_roadmap_order_race(self) -> None:
+        events = [
+            call("git push"),
+            output(
+                1,
+                "! [rejected] main -> main (fetch first)\n"
+                "Updates were rejected because the remote contains work that you do not have locally.",
+            ),
+            call("git fetch --prune origin && git rebase origin/main"),
+            output(0, "Successfully rebased and updated refs/heads/main."),
+            call("python3 tools/roadmap_guard.py complete --prompt-id 838979 --dry-run"),
+            output(1, "selected=673914 requested=838979"),
+        ]
+        result = recent.enrich(
+            {
+                "prompt_id": "838979",
+                "input_tokens": 168478,
+                "cached_input_tokens": 167296,
+                "uncached_input_tokens": 1182,
+                "tool_call_count": 3,
+                "duration_seconds": 30,
+                "repo_paths": ["/repo"],
+            },
+            events,
+        )
+        codes = {item["code"] for item in result["findings"]}
+
+        self.assertEqual(1, result["push_rejection_count"])
+        self.assertEqual(1, result["git_rebase_command_count"])
+        self.assertEqual(
+            [{"selected": "673914", "requested": "838979"}],
+            result["roadmap_guard_mismatches"],
+        )
+        self.assertIn("remote_advanced_during_task", codes)
+        self.assertIn("push_reject_rebase_churn", codes)
+        self.assertIn("roadmap_guard_order_mismatch", codes)
 
     def test_recent_ranking_uses_roundtrips_or_duration_and_aggregates_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
