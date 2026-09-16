@@ -10,8 +10,8 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
-import codex_session_archive as archive
-import codex_usage_publisher_legacy as publisher
+from codex_monitor.capsules.session_archive import api as archive
+from . import legacy_api as publisher
 
 VERSION = "2026.09.16"
 DEFAULT_SOURCE_ROOT = Path.home() / ".codex/sessions"

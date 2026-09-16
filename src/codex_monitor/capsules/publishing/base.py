@@ -8,8 +8,31 @@ import sqlite3
 import subprocess
 from typing import Any
 
-import codex_usage_publisher_legacy as legacy
-from codex_usage_publisher_legacy import *  # noqa: F401,F403
+from . import legacy
+from .legacy import (
+    DEFAULT_DATA_REMOTE,
+    DEFAULT_DATA_REPO,
+    DEFAULT_QUOTA_DB,
+    DEFAULT_SOURCE_ROOT,
+    DEFAULT_STATE_DIR,
+    PublisherError,
+    assert_private_repo,
+    atomic_write,
+    build_parser,
+    command_status,
+    dedupe_cycle_keys,
+    digest_text,
+    ensure_repo,
+    git_ok,
+    json_obj,
+    prompt_dir,
+    quota_index,
+    run,
+    source_sha,
+    utc_stamp,
+    write_json,
+    write_jsonl,
+)
 
 
 VERSION = "2026.09.16"
@@ -458,9 +481,15 @@ def _full_fingerprint(cycle: dict[str, Any]) -> str:
     return legacy.digest_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 
-def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def parse_session(
+    path: Path,
+    con: sqlite3.Connection,
+    *,
+    legacy_parse_session_fn=None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     global _should_export
-    cycles, events = _legacy_parse_session(path, con)
+    parser = legacy_parse_session_fn or _legacy_parse_session
+    cycles, events = parser(path, con)
     last_prompt_id: str | None = None
     last_status: str | None = None
     migrated = False
@@ -570,30 +599,31 @@ def send_batch_telegram(cycles: list[dict[str, Any]], dry_run: bool) -> bool:
     return _legacy_send_batch_telegram(selected, dry_run)
 
 
-def _install_runtime() -> None:
-    legacy.VERSION = VERSION
-    legacy.connect_state = connect_state
-    legacy.prompt_id_from_text = prompt_id_from_text
-    legacy.status_from_final = status_from_final
-    legacy.chat_metrics = chat_metrics
-    legacy.parse_session = parse_session
-    legacy.export_repo = export_repo
-    legacy.send_batch_telegram = globals()["send_batch_telegram"]
-    # Keep the original publisher tests/mock hooks working through this compatibility layer.
-    legacy.assert_private_repo = globals()["assert_private_repo"]
-    legacy.ensure_repo = globals()["ensure_repo"]
-    legacy.git_ok = globals()["git_ok"]
-    legacy.run = globals()["run"]
-    legacy.command_run = command_run
-
-
-def command_run(args) -> int:
+def command_run(
+    args,
+    *,
+    parse_session_fn=parse_session,
+    export_repo_fn=export_repo,
+    send_batch_telegram_fn=send_batch_telegram,
+) -> int:
     global _should_export, _notify_cycle_objects, _guard_candidate_cycles
     _should_export = False
     _notify_cycle_objects = set()
     _guard_candidate_cycles = {}
-    _install_runtime()
-    result = int(_legacy_command_run(args))
+    result = int(
+        _legacy_command_run(
+            args,
+            assert_private_repo_fn=assert_private_repo,
+            connect_state_fn=connect_state,
+            parse_session_fn=parse_session_fn,
+            ensure_repo_fn=ensure_repo,
+            export_repo_fn=export_repo_fn,
+            run_fn=run,
+            send_batch_telegram_fn=send_batch_telegram_fn,
+            git_ok_fn=git_ok,
+            utc_stamp_fn=utc_stamp,
+        )
+    )
     if result == 0 and _guard_candidate_cycles:
         state_dir = Path(args.state_dir).expanduser()
         with connect_state(state_dir) as con:
@@ -613,11 +643,16 @@ def command_run(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    _install_runtime()
-    return int(legacy.main(argv))
-
-
-_install_runtime()
+    args = build_parser().parse_args(argv)
+    try:
+        if args.command == "run":
+            return command_run(args)
+        return int(command_status(args))
+    except PublisherError as exc:
+        return legacy.publisher_error_result(exc)
+    except BlockingIOError:
+        print(json.dumps({"status": "locked"}, sort_keys=True))
+        return 0
 
 
 if __name__ == "__main__":

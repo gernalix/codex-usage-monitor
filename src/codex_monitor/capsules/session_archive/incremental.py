@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-import codex_session_archive as archive
+from . import api as archive
 
 DEFAULT_ARCHIVE_ROOT = archive.DEFAULT_ARCHIVE_ROOT
 DEFAULT_SOURCE_ROOT = archive.DEFAULT_SOURCE_ROOT

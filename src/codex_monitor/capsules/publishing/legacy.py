@@ -16,8 +16,8 @@ import sys
 import tempfile
 from typing import Any
 
-import codex_session_archive as archive
-import codex_usage_monitor as quota
+from codex_monitor.capsules.session_archive import api as archive
+from codex_monitor.capsules.quota import api as quota
 
 
 VERSION = "2026.09.05"
@@ -574,18 +574,30 @@ def send_batch_telegram(cycles: list[dict[str, Any]], dry_run: bool) -> bool:
     return True
 
 
-def command_run(args: argparse.Namespace) -> int:
-    assert_private_repo(args.remote)
+def command_run(
+    args: argparse.Namespace,
+    *,
+    assert_private_repo_fn=assert_private_repo,
+    connect_state_fn=connect_state,
+    parse_session_fn=parse_session,
+    ensure_repo_fn=ensure_repo,
+    export_repo_fn=export_repo,
+    run_fn=run,
+    send_batch_telegram_fn=send_batch_telegram,
+    git_ok_fn=git_ok,
+    utc_stamp_fn=utc_stamp,
+) -> int:
+    assert_private_repo_fn(args.remote)
     state_dir = Path(args.state_dir).expanduser()
     source_root = Path(args.source_root).expanduser()
     repo = Path(args.data_repo).expanduser()
     quota_db = Path(args.quota_db).expanduser()
     with ExclusiveLock(state_dir / "publisher.lock"):
-        with connect_state(state_dir) as con:
+        with connect_state_fn(state_dir) as con:
             cycles: list[dict[str, Any]] = []
             chat_events: dict[int, list[dict[str, Any]]] = {}
             for path in sorted(source_root.glob("**/*.jsonl")):
-                parsed, events = parse_session(path, con)
+                parsed, events = parse_session_fn(path, con)
                 for cycle in parsed:
                     cycles.append(cycle)
                 if parsed:
@@ -605,11 +617,11 @@ def command_run(args: argparse.Namespace) -> int:
                     or row["prompt_id"] != cycle["metrics"].get("prompt_id")
                 ):
                     pending_cycles.append(cycle)
-            ensure_repo(repo, args.remote)
-            export_repo(repo, cycles, chat_events, quota_db)
-            status = run(["git", "status", "--short"], repo).stdout
+            ensure_repo_fn(repo, args.remote)
+            export_repo_fn(repo, cycles, chat_events, quota_db)
+            status = run_fn(["git", "status", "--short"], repo).stdout
             if not status.strip():
-                current_commit = run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
+                current_commit = run_fn(["git", "rev-parse", "HEAD"], repo).stdout.strip()
                 retry_cycles = []
                 for cycle in cycles:
                     row = con.execute(
@@ -632,14 +644,14 @@ def command_run(args: argparse.Namespace) -> int:
                                 published_commit=excluded.published_commit,
                                 updated_at_utc=excluded.updated_at_utc
                             """,
-                            (m["cycle_key"], m["native_session_id"], m["chat_id"], m.get("prompt_id"), m.get("turn_id"), cycle["final_event_id"], m["source_path"], cycle["source_sha256"], cycle.get("cycle_sha256", cycle["source_sha256"]), cycle.get("fingerprint_schema"), m.get("timestamp_end_utc"), current_commit, utc_stamp()),
+                            (m["cycle_key"], m["native_session_id"], m["chat_id"], m.get("prompt_id"), m.get("turn_id"), cycle["final_event_id"], m["source_path"], cycle["source_sha256"], cycle.get("cycle_sha256", cycle["source_sha256"]), cycle.get("fingerprint_schema"), m.get("timestamp_end_utc"), current_commit, utc_stamp_fn()),
                         )
                         retry_cycles.append(cycle)
                 if retry_cycles:
                     con.commit()
                 if retry_cycles:
                     retry_keys = {c["metrics"]["cycle_key"] for c in retry_cycles}
-                    send_batch_telegram(retry_cycles, args.dry_run_telegram)
+                    send_batch_telegram_fn(retry_cycles, args.dry_run_telegram)
                     con.execute("UPDATE cycles SET telegram_sent=1 WHERE cycle_key IN (%s)" % ",".join("?" for _ in retry_keys), tuple(retry_keys))
                     con.commit()
                     print(json.dumps({"status": "telegram_retried", "chats": len({c["metrics"]["chat_id"] for c in retry_cycles}), "cycles": len(retry_cycles)}, sort_keys=True))
@@ -649,8 +661,8 @@ def command_run(args: argparse.Namespace) -> int:
             if args.no_push:
                 print(json.dumps({"status": "dry_run", "changed": status.strip().splitlines()}, sort_keys=True))
                 return 0
-            git_ok(["git", "add", "index", "prompts", "chats", "metadata"], repo)
-            status = run(["git", "status", "--short"], repo).stdout
+            git_ok_fn(["git", "add", "index", "prompts", "chats", "metadata"], repo)
+            status = run_fn(["git", "status", "--short"], repo).stdout
             if not status.strip():
                 print(json.dumps({"status": "noop"}, sort_keys=True))
                 return 0
@@ -659,9 +671,9 @@ def command_run(args: argparse.Namespace) -> int:
                 msg = f"usage: prompt {pending_cycles[0]['metrics']['prompt_id']} chat {pending_cycles[0]['metrics']['chat_id']}"
             else:
                 msg = f"usage: publish {len(pending_cycles)} prompt cycles"
-            git_ok(["git", "commit", "-m", msg], repo)
-            git_ok(["git", "push", "origin", "main"], repo, timeout=240)
-            commit = run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
+            git_ok_fn(["git", "commit", "-m", msg], repo)
+            git_ok_fn(["git", "push", "origin", "main"], repo, timeout=240)
+            commit = run_fn(["git", "rev-parse", "HEAD"], repo).stdout.strip()
             for cycle in pending_cycles:
                 m = cycle["metrics"]
                 con.execute(
@@ -676,11 +688,11 @@ def command_run(args: argparse.Namespace) -> int:
                         published_commit=excluded.published_commit,
                         updated_at_utc=excluded.updated_at_utc
                     """,
-                    (m["cycle_key"], m["native_session_id"], m["chat_id"], m.get("prompt_id"), m.get("turn_id"), cycle["final_event_id"], m["source_path"], cycle["source_sha256"], cycle.get("cycle_sha256", cycle["source_sha256"]), cycle.get("fingerprint_schema"), m.get("timestamp_end_utc"), commit, utc_stamp()),
+                    (m["cycle_key"], m["native_session_id"], m["chat_id"], m.get("prompt_id"), m.get("turn_id"), cycle["final_event_id"], m["source_path"], cycle["source_sha256"], cycle.get("cycle_sha256", cycle["source_sha256"]), cycle.get("fingerprint_schema"), m.get("timestamp_end_utc"), commit, utc_stamp_fn()),
                 )
             con.commit()
             if pending_cycles:
-                send_batch_telegram(pending_cycles, args.dry_run_telegram)
+                send_batch_telegram_fn(pending_cycles, args.dry_run_telegram)
                 con.execute("UPDATE cycles SET telegram_sent=1 WHERE cycle_key IN (%s)" % ",".join("?" for _ in changed_cycle_keys), tuple(changed_cycle_keys))
                 con.commit()
             print(json.dumps({"status": "published", "commit": commit, "chats": len(chat_events), "cycles": len(cycles), "published_cycles": len(pending_cycles)}, sort_keys=True))
@@ -711,17 +723,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def publisher_error_result(exc: PublisherError) -> int:
+    text = str(exc)
+    if text == "BLOCKED_REPO_PUBLIC":
+        print(json.dumps({"status": text}, sort_keys=True), file=sys.stderr)
+        return 76
+    print(json.dumps({"status": "error", "error": archive.redact_text(text)}, sort_keys=True), file=sys.stderr)
+    return 75
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return int(args.func(args))
     except PublisherError as exc:
-        text = str(exc)
-        if text == "BLOCKED_REPO_PUBLIC":
-            print(json.dumps({"status": text}, sort_keys=True), file=sys.stderr)
-            return 76
-        print(json.dumps({"status": "error", "error": archive.redact_text(text)}, sort_keys=True), file=sys.stderr)
-        return 75
+        return publisher_error_result(exc)
     except BlockingIOError:
         print(json.dumps({"status": "locked"}, sort_keys=True))
         return 0

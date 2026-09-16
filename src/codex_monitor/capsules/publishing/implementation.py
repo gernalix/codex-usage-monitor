@@ -7,8 +7,46 @@ import sqlite3
 import sys
 from typing import Any
 
-import codex_usage_publisher_base as _base
-from codex_usage_publisher_base import *  # noqa: F401,F403
+from . import base as _base
+from .base import (
+    ATTACHMENTS_ROOT,
+    DEFAULT_DATA_REMOTE,
+    DEFAULT_DATA_REPO,
+    DEFAULT_QUOTA_DB,
+    DEFAULT_SOURCE_ROOT,
+    DEFAULT_STATE_DIR,
+    FINGERPRINT_SCHEMA,
+    GUARD_METADATA_KEYS,
+    PublisherError,
+    _apply_patch_write_paths_from_event,
+    _fingerprint,
+    _full_fingerprint,
+    _repo_roots,
+    _run_git,
+    assert_private_repo,
+    build_parser,
+    chat_metrics,
+    classify_git_repo,
+    command_run,
+    command_status,
+    connect_state,
+    dedupe_cycle_keys,
+    digest_text,
+    ensure_repo,
+    git_ok,
+    json_obj,
+    prompt_dir,
+    prompt_id_from_text,
+    quota_index,
+    record_git_completion_guard,
+    run,
+    send_batch_telegram,
+    source_sha,
+    status_from_final,
+    utc_stamp,
+    write_json,
+    write_jsonl,
+)
 
 
 VERSION = "2026.09.16.4"
@@ -188,7 +226,11 @@ def _legacy_parse_session_with_goal_recovery(
 
 
 def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    cycles, events = _BASE_PARSE_SESSION(path, con)
+    cycles, events = _BASE_PARSE_SESSION(
+        path,
+        con,
+        legacy_parse_session_fn=_legacy_parse_session_with_goal_recovery,
+    )
     last_prompt_id: str | None = None
     last_status: str | None = None
     changed = False
@@ -328,18 +370,25 @@ def export_repo(
             _base.write_json(latest_path, latest)
 
 
-_base.VERSION = VERSION
-_base._legacy_parse_session = _legacy_parse_session_with_goal_recovery
-_base._recover_completed_goal_aborts = _recover_completed_goal_aborts
-_base._goal_completion = _goal_completion
-_base.parse_session = parse_session
-_base.export_repo = export_repo
-_base.legacy.parse_session = parse_session
-_base.legacy.export_repo = export_repo
+def command_run(args) -> int:
+    return _base.command_run(args, parse_session_fn=parse_session, export_repo_fn=export_repo)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        if args.command == "run":
+            return command_run(args)
+        return int(command_status(args))
+    except PublisherError as exc:
+        return _base.legacy.publisher_error_result(exc)
+    except BlockingIOError:
+        print(json.dumps({"status": "locked"}, sort_keys=True))
+        return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(_base.main())
+    raise SystemExit(main())
 
 # Make imports receive the patched mature module itself so existing monkeypatch
 # tests still target the globals used by its functions.

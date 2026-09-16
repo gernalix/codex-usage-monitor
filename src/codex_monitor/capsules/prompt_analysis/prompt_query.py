@@ -11,7 +11,7 @@ import sqlite3
 import sys
 from typing import Any
 
-import codex_task_costs as costs
+from . import costs_api as costs
 
 DEFAULT_DB = Path.home() / ".local/share/codex-session-archive/index/task_costs.sqlite"
 DEFAULT_SOURCE_ROOT = Path.home() / ".codex/sessions"

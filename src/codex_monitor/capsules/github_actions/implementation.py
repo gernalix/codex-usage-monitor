@@ -13,7 +13,7 @@ import sys
 import tempfile
 from typing import Any
 
-import codex_usage_monitor as quota
+from codex_monitor.capsules.quota import api as quota
 
 
 VERSION = "2026.09.16"
