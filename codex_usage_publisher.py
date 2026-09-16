@@ -453,6 +453,11 @@ def _fingerprint(cycle: dict[str, Any]) -> str:
     return legacy.digest_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 
+def _full_fingerprint(cycle: dict[str, Any]) -> str:
+    payload = {"metrics": cycle["metrics"], "events": cycle["events"]}
+    return legacy.digest_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
 def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     global _should_export
     cycles, events = _legacy_parse_session(path, con)
