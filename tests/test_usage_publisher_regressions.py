@@ -45,6 +45,13 @@ def plain_followup(text: str = "autorizzo", final_response: str = "RESULT=PASS")
     ]
 
 
+def automatic_continuation(final_response: str = "RESULT=PASS") -> list[dict[str, object]]:
+    return [
+        {"timestamp": "2026-09-16T00:50:00Z", "type": "turn_context", "payload": {"turn_id": "turn-auto", "model": "gpt-5.6-sol", "collaboration_mode": {"settings": {"reasoning_effort": "medium"}}}},
+        {"timestamp": "2026-09-16T00:50:02Z", "type": "event_msg", "payload": {"type": "task_complete", "turn_id": "turn-auto", "last_agent_message": final_response, "duration_ms": 500}},
+    ]
+
+
 def goal_continuation() -> list[dict[str, object]]:
     return [
         {"timestamp": "2026-09-07T10:01:00Z", "type": "turn_context", "payload": {"turn_id": "turn-2", "model": "gpt-5.5", "collaboration_mode": {"settings": {"reasoning_effort": "medium"}}}},
@@ -80,6 +87,29 @@ class UsagePublisherRegressionTests(unittest.TestCase):
             finally:
                 publisher.ATTACHMENTS_ROOT = original_root
             self.assertEqual(cycles[0]["metrics"]["prompt_id"], "472913")
+
+    def test_empty_automatic_continuation_inherits_active_prompt_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            attachments_root = root / ".codex/attachments"
+            attachment = attachments_root / "78a4850d-5cfe-4204-bb55-b890e7f8a5af/pasted-text-1.txt"
+            attachment.parent.mkdir(parents=True)
+            attachment.write_text("PROMPT_ID=472913\n", encoding="utf-8")
+            session = root / "session.jsonl"
+            rows = attached_prompt_cycle(
+                attachment,
+                final_response="Selected model is at capacity. Please try a different model.",
+            ) + automatic_continuation("RESULT=PASS")
+            write_jsonl(session, rows)
+            original_root = publisher.ATTACHMENTS_ROOT
+            publisher.ATTACHMENTS_ROOT = attachments_root
+            try:
+                with publisher.connect_state(root / "state") as con:
+                    cycles, _events = publisher.parse_session(session, con)
+            finally:
+                publisher.ATTACHMENTS_ROOT = original_root
+            self.assertEqual(cycles[1]["metrics"]["prompt_text_redacted"], None)
+            self.assertEqual([cycle["metrics"]["prompt_id"] for cycle in cycles], ["472913", "472913"])
 
     def test_blocked_user_followup_inherits_active_prompt_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
