@@ -33,6 +33,11 @@ SCHEMA_PROBE_RE = re.compile(r"(?:\bpragma\s+table_info\s*\(|(?:^|[\s'\"])\.tabl
 GRADLE_SUCCESS_RE = re.compile(r"\bBUILD SUCCESSFUL\b", re.I)
 TRACE_ARTIFACT_RE = re.compile(r"trace_processor|\.pftrace\b", re.I)
 TRACE_DISCOVERY_RE = re.compile(r"\brg\s+--files\b|\bfind\b|\bwhich\b|\bls\b", re.I)
+GOAL_START_CONFLICT_RE = re.compile(
+    r"cannot create a new goal because this thread has an unfinished goal",
+    re.I,
+)
+ROADMAP_IDENTITY_MISMATCH_RE = re.compile(r"prompt_identity_mismatch", re.I)
 REPORTED_STATUS_RE = re.compile(
     r"(?im)^\s*STATUS\s*:\s*(PASS|FAIL|BLOCKED|PARTIAL|WAITING_FOR_EVENT|BLOCKED_REPO_PUBLIC)\b"
 )
@@ -98,13 +103,20 @@ def load_prompt_attempts(db_path: Path, prompt_id: str) -> list[dict[str, Any]]:
 
 
 def _command_text(event: dict[str, Any]) -> str:
-    if event.get("tool_name") not in {"exec_command", "shell"}:
+    if event.get("tool_name") not in {"exec", "exec_command", "shell"}:
         return ""
-    args = _json_obj(event.get("content_text"))
-    command = args.get("cmd")
+    raw = event.get("tool_input_text")
+    if not isinstance(raw, (str, dict)):
+        raw = event.get("content_text")
+    args = _json_obj(raw)
+    command = args.get("cmd") or args.get("command")
     if isinstance(command, list):
         command = " ".join(str(part) for part in command)
-    return " ".join(command.split()) if isinstance(command, str) else ""
+    if isinstance(command, str):
+        return " ".join(command.split())
+    if isinstance(raw, str) and raw.strip() and not args:
+        return " ".join(raw.split())
+    return ""
 
 
 def _unscoped_adb_installs(command: str) -> int:
@@ -173,6 +185,17 @@ def _tool_failure_counts(events: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
+def _output_pattern_count(events: list[dict[str, Any]], pattern: re.Pattern[str]) -> int:
+    count = 0
+    for event in events:
+        if event.get("subtype") not in {"function_call_output", "custom_tool_call_output"}:
+            continue
+        text = event.get("content_text")
+        if isinstance(text, str) and pattern.search(text):
+            count += 1
+    return count
+
+
 def _broad_boot_journal_scans(command: str) -> int:
     count = 0
     for match in JOURNAL_SEGMENT_RE.finditer(command):
@@ -208,6 +231,8 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
     broad_boot_journal_scans = sum(_broad_boot_journal_scans(command) for command in commands)
     schema_probe_commands = sum(bool(SCHEMA_PROBE_RE.search(command)) for command in commands)
     failure_counts = _tool_failure_counts(events)
+    goal_start_conflicts = _output_pattern_count(events, GOAL_START_CONFLICT_RE)
+    roadmap_identity_mismatches = _output_pattern_count(events, ROADMAP_IDENTITY_MISMATCH_RE)
 
     tool_output_counts = [
         count
@@ -249,6 +274,10 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
         findings.append({"code": "sqlite_readonly_retry", "count": failure_counts["sqlite_readonly_failures"]})
     if failure_counts["python_import_failures"]:
         findings.append({"code": "python_import_retry", "count": failure_counts["python_import_failures"]})
+    if goal_start_conflicts:
+        findings.append({"code": "goal_start_conflict", "count": goal_start_conflicts})
+    if roadmap_identity_mismatches:
+        findings.append({"code": "roadmap_identity_mismatch", "count": roadmap_identity_mismatches})
     if large_tool_outputs:
         findings.append(
             {
@@ -329,6 +358,8 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
         "failed_command_count": failure_counts["failed_commands"],
         "sqlite_readonly_failure_count": failure_counts["sqlite_readonly_failures"],
         "python_import_failure_count": failure_counts["python_import_failures"],
+        "goal_start_conflict_count": goal_start_conflicts,
+        "roadmap_identity_mismatch_count": roadmap_identity_mismatches,
         "tool_output_tokens_observed": sum(tool_output_counts),
         "max_tool_output_tokens": max(tool_output_counts, default=0),
         "large_tool_output_count": len(large_tool_outputs),
