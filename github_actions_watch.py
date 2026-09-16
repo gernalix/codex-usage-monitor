@@ -415,6 +415,17 @@ def git_ok(args: list[str], cwd: Path, *, timeout: int = 180) -> str:
     return result.stdout.strip()
 
 
+OBSERVATION_FIELDS = {"generated_at_utc", "last_observed_at", "last_notified_at", "observed_at"}
+
+
+def semantic_snapshot(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: semantic_snapshot(item) for key, item in value.items() if key not in OBSERVATION_FIELDS}
+    if isinstance(value, list):
+        return [semantic_snapshot(item) for item in value]
+    return value
+
+
 def publish_snapshot(repo: Path, remote: str, snapshot: dict[str, Any], *, dry_run: bool) -> dict[str, Any]:
     if dry_run:
         return {"status": "dry_run"}
@@ -436,8 +447,15 @@ def publish_snapshot(repo: Path, remote: str, snapshot: dict[str, Any], *, dry_r
         target = repo / "index/github-actions.json"
         text = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
         existing = target.read_text(encoding="utf-8") if target.exists() else None
-        if existing == text:
-            return {"status": "noop"}
+        if existing is not None:
+            try:
+                existing_snapshot = json.loads(existing)
+            except json.JSONDecodeError:
+                existing_snapshot = None
+            if existing_snapshot is not None and semantic_snapshot(existing_snapshot) == semantic_snapshot(snapshot):
+                return {"status": "noop"}
+            if existing == text:
+                return {"status": "noop"}
         atomic_write(target, text)
         git_ok(["add", "index/github-actions.json"], repo)
         staged = run(["git", "diff", "--cached", "--quiet", "--", "index/github-actions.json"], cwd=repo)
