@@ -10,6 +10,7 @@ from typing import Any
 
 
 MEMORY_MARKER = "/.codex/memories/MEMORY.md"
+ADB_INSTALL_RE = re.compile(r"\badb\s+(?P<before_install>[^;&|\n]*?)\binstall\b", re.I)
 
 
 def _json_obj(value: Any) -> dict[str, Any]:
@@ -51,16 +52,21 @@ def _command_text(event: dict[str, Any]) -> str:
     return " ".join(command.split()) if isinstance(command, str) else ""
 
 
+def _unscoped_adb_installs(command: str) -> int:
+    count = 0
+    for match in ADB_INSTALL_RE.finditer(command):
+        before_install = match.group("before_install")
+        if not re.search(r"(?:^|\s)-s\s+\S+", before_install):
+            count += 1
+    return count
+
+
 def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:
     repo_paths = [str(value) for value in metrics.get("repo_paths") or []]
     unique_repo_paths = list(dict.fromkeys(repo_paths))
     commands = [command for event in events if (command := _command_text(event))]
     memory_reads = sum(MEMORY_MARKER in command for command in commands)
-    unscoped_adb_installs = sum(
-        bool(re.search(r"(?:^|[;&|]\s*)adb\s+install\b", command))
-        and not bool(re.search(r"(?:^|\s)-s\s+\S+", command))
-        for command in commands
-    )
+    unscoped_adb_installs = sum(_unscoped_adb_installs(command) for command in commands)
     trace_processor_commands = sum("trace_processor" in command for command in commands)
 
     repeated = [
