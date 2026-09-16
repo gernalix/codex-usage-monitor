@@ -9,7 +9,7 @@ from scripts import analyze_published_prompt as published
 
 
 class PublishedPromptAnalysisTests(unittest.TestCase):
-    def test_loads_latest_cycle_metrics_and_transcript(self) -> None:
+    def test_loads_latest_cycle_metrics_transcript_and_goal_usage(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / "index").mkdir()
@@ -37,6 +37,7 @@ class PublishedPromptAnalysisTests(unittest.TestCase):
                 json.dumps(
                     {
                         "prompt_id": "812604",
+                        "total_tokens": 104989,
                         "input_tokens": 104810,
                         "cached_input_tokens": 103808,
                         "uncached_input_tokens": 1002,
@@ -58,6 +59,13 @@ class PublishedPromptAnalysisTests(unittest.TestCase):
                     "tool_name": None,
                     "content_text": "Process exited with code 2\nNo such file or directory",
                 },
+                {
+                    "subtype": "function_call_output",
+                    "tool_name": None,
+                    "content_text": json.dumps(
+                        {"goal": {"tokensUsed": 113743, "timeUsedSeconds": 271, "status": "complete"}}
+                    ),
+                },
             ]
             (prompt_dir / "transcript.jsonl").write_text(
                 "".join(json.dumps(event) + "\n" for event in events),
@@ -72,7 +80,11 @@ class PublishedPromptAnalysisTests(unittest.TestCase):
         self.assertTrue(result["transcript_available"])
         self.assertEqual(result["timestamp_end_utc"], "2026-09-16T04:41:09Z")
         self.assertEqual(result["failed_command_count"], 1)
+        self.assertEqual(result["goal_reported_tokens"], 113743)
+        self.assertEqual(result["goal_reported_time_seconds"], 271.0)
+        self.assertEqual(result["goal_vs_metrics_token_delta"], 8754)
         self.assertIn("roundtrip_heavy_cached_session", codes)
+        self.assertIn("goal_metrics_token_delta", codes)
         self.assertIn("published_prompt_has_multiple_cycles", codes)
 
     def test_missing_prompt_is_explicit(self) -> None:
