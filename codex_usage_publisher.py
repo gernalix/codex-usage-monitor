@@ -16,6 +16,9 @@ VERSION = "2026.09.15"
 FINGERPRINT_SCHEMA = 2
 GUARD_METADATA_KEYS = {"repo_project", "repo_paths", "repo_projects", "repo_write_projects", "repo_path_kinds"}
 _GOAL_PREFIX = '<codex_internal_context source="goal">'
+ATTACHMENTS_ROOT = Path.home() / ".codex/attachments"
+_ATTACHMENT_PATH_RE = re.compile(r"/[^\s`\"']*\.codex/attachments/[^\s`\"']+")
+_PROMPT_ID_FALLBACK_RE = re.compile(r"\bPROMPT_ID\s*[:=]\s*[`*_~]*([A-Za-z0-9_.-]+)\b")
 _legacy_connect_state = legacy.connect_state
 _legacy_parse_session = legacy.parse_session
 _legacy_export_repo = legacy.export_repo
@@ -27,13 +30,39 @@ _notify_cycle_objects: set[int] = set()
 _guard_candidate_cycles: dict[str, dict[str, Any]] = {}
 
 
-def prompt_id_from_text(text: str) -> str | None:
+def _literal_prompt_id(text: str) -> str | None:
     prompt_id = legacy.archive.prompt_id_from_text(text)
     if prompt_id:
         return prompt_id
     normalized = (text or "").replace(r"\_", "_")
-    match = re.search(r"\bPROMPT_ID\s*[:=]\s*[`*_~]*([A-Za-z0-9_.-]+)\b", normalized)
+    match = _PROMPT_ID_FALLBACK_RE.search(normalized)
     return match.group(1) if match else None
+
+
+def prompt_id_from_text(text: str) -> str | None:
+    prompt_id = _literal_prompt_id(text)
+    if prompt_id:
+        return prompt_id
+
+    try:
+        attachments_root = ATTACHMENTS_ROOT.resolve()
+    except OSError:
+        return None
+    for raw_path in _ATTACHMENT_PATH_RE.findall(text or ""):
+        candidate = Path(raw_path.rstrip(".,;:)]}>")).expanduser()
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if attachments_root not in resolved.parents or not resolved.is_file():
+            continue
+        try:
+            prompt_id = _literal_prompt_id(resolved.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        if prompt_id:
+            return prompt_id
+    return None
 
 
 def status_from_final(text: str) -> str:
