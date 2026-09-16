@@ -30,9 +30,11 @@ class PromptEfficiencyTests(unittest.TestCase):
         self.assertEqual(result["repo_path_count"], 3)
         self.assertEqual(result["unique_repo_path_count"], 2)
         self.assertEqual(result["memory_read_count"], 2)
+        self.assertEqual(result["avoidable_context_read_count"], 2)
         self.assertEqual(result["repeated_exact_commands"][0]["count"], 2)
         self.assertIn("duplicate_repo_paths", codes)
         self.assertIn("memory_reads", codes)
+        self.assertIn("avoidable_context_reads", codes)
         self.assertIn("repeated_exact_commands", codes)
         self.assertIn("high_tool_call_count", codes)
         self.assertIn("high_uncached_input_tokens", codes)
@@ -76,6 +78,53 @@ class PromptEfficiencyTests(unittest.TestCase):
         self.assertIn("unscoped_adb_install", codes)
         self.assertIn("trace_processor_discovery_churn", codes)
         self.assertNotIn("high_uncached_input_tokens", codes)
+
+    def test_827614_shape_flags_roundtrip_and_avoidable_meta_reads(self) -> None:
+        metrics = {
+            "prompt_id": "827614",
+            "total_tokens": 64863,
+            "input_tokens": 64345,
+            "cached_input_tokens": 63872,
+            "uncached_input_tokens": 473,
+            "output_tokens": 518,
+            "reasoning_output_tokens": 227,
+            "tool_call_count": 38,
+            "duration_seconds": 247.025,
+            "repo_paths": ["/repo"],
+        }
+        events = [
+            {
+                "tool_name": "exec_command",
+                "content_text": json.dumps({"cmd": "sed -n '1,220p' /home/user/projects/codex-roadmap/README.md"}),
+            },
+            {
+                "tool_name": "exec_command",
+                "content_text": json.dumps({"cmd": "rg -n watcher /home/user/.codex/memories/MEMORY.md"}),
+            },
+            {
+                "tool_name": "exec_command",
+                "content_text": json.dumps({"cmd": "sed -n '930,980p' /home/user/.codex/memories/MEMORY.md"}),
+            },
+            {
+                "tool_name": "exec_command",
+                "content_text": json.dumps({"cmd": "sed -n '1698,1706p' /home/user/.codex/memories/MEMORY.md"}),
+            },
+        ]
+
+        result = efficiency.analyze(metrics, events)
+        codes = {item["code"] for item in result["findings"]}
+
+        self.assertEqual(3, result["memory_read_count"])
+        self.assertEqual(1, result["roadmap_meta_read_count"])
+        self.assertEqual(4, result["avoidable_context_read_count"])
+        self.assertEqual(518, result["output_tokens"])
+        self.assertEqual(227, result["reasoning_output_tokens"])
+        self.assertAlmostEqual(247.025, result["duration_seconds"])
+        self.assertIn("memory_reads", codes)
+        self.assertIn("roadmap_meta_reads", codes)
+        self.assertIn("avoidable_context_reads", codes)
+        self.assertIn("roundtrip_heavy_cached_session", codes)
+        self.assertNotIn("high_tool_call_count", codes)
 
     def test_serial_scoped_adb_install_is_not_flagged(self) -> None:
         result = efficiency.analyze(

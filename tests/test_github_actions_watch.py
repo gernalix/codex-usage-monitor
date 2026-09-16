@@ -98,6 +98,32 @@ class GitHubActionsWatchTests(unittest.TestCase):
         self.assertEqual(["a", "b"], events)
         self.assertIn("2 GitHub CI incidents open", message)
 
+    def test_semantic_snapshot_ignores_only_observation_metadata(self) -> None:
+        base = {
+            "schema": "codex-usage.github-actions.v1",
+            "generated_at_utc": "2026-09-16T10:00:00Z",
+            "active_incident_count": 1,
+            "active_incidents": [
+                {
+                    "incident_key": "gernalix/example|10|main",
+                    "failure_count": 1,
+                    "last_observed_at": "2026-09-16T10:00:00Z",
+                    "last_notified_at": "2026-09-16T10:00:10Z",
+                }
+            ],
+            "recent_events": [{"type": "failure", "observed_at": "2026-09-16T10:00:00Z"}],
+        }
+        observation_only = json.loads(json.dumps(base))
+        observation_only["generated_at_utc"] = "2026-09-16T11:00:00Z"
+        observation_only["active_incidents"][0]["last_observed_at"] = "2026-09-16T11:00:00Z"
+        observation_only["active_incidents"][0]["last_notified_at"] = "2026-09-16T11:00:10Z"
+        observation_only["recent_events"][0]["observed_at"] = "2026-09-16T11:00:00Z"
+        semantic_change = json.loads(json.dumps(observation_only))
+        semantic_change["active_incidents"][0]["failure_count"] = 2
+
+        self.assertEqual(watch.semantic_snapshot(base), watch.semantic_snapshot(observation_only))
+        self.assertNotEqual(watch.semantic_snapshot(base), watch.semantic_snapshot(semantic_change))
+
     def test_publish_noops_when_only_observation_metadata_changed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

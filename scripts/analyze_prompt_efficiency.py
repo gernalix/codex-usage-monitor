@@ -10,6 +10,13 @@ from typing import Any
 
 
 MEMORY_MARKER = "/.codex/memories/MEMORY.md"
+ROADMAP_META_MARKERS = (
+    "/codex-roadmap/README.md",
+    "/codex-roadmap/roadmap.md",
+    "/codex-roadmap/spiegazioni.md",
+    "/codex-roadmap/STANDARD_PROMPT.md",
+)
+ROUNDTRIP_HEAVY_TOOL_CALL_THRESHOLD = 30
 ADB_INSTALL_RE = re.compile(r"\badb\s+(?P<before_install>[^;&|\n]*?)\binstall\b", re.I)
 
 
@@ -61,11 +68,17 @@ def _unscoped_adb_installs(command: str) -> int:
     return count
 
 
+def _roadmap_meta_read(command: str) -> bool:
+    return any(marker in command for marker in ROADMAP_META_MARKERS)
+
+
 def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:
     repo_paths = [str(value) for value in metrics.get("repo_paths") or []]
     unique_repo_paths = list(dict.fromkeys(repo_paths))
     commands = [command for event in events if (command := _command_text(event))]
     memory_reads = sum(MEMORY_MARKER in command for command in commands)
+    roadmap_meta_reads = sum(_roadmap_meta_read(command) for command in commands)
+    avoidable_context_reads = memory_reads + roadmap_meta_reads
     unscoped_adb_installs = sum(_unscoped_adb_installs(command) for command in commands)
     trace_processor_commands = sum("trace_processor" in command for command in commands)
 
@@ -80,6 +93,10 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
         findings.append({"code": "duplicate_repo_paths", "count": duplicates})
     if memory_reads:
         findings.append({"code": "memory_reads", "count": memory_reads})
+    if roadmap_meta_reads:
+        findings.append({"code": "roadmap_meta_reads", "count": roadmap_meta_reads})
+    if avoidable_context_reads:
+        findings.append({"code": "avoidable_context_reads", "count": avoidable_context_reads})
     if repeated:
         findings.append({"code": "repeated_exact_commands", "count": sum(item["count"] - 1 for item in repeated)})
     if unscoped_adb_installs:
@@ -91,6 +108,8 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
     input_tokens = int(metrics.get("input_tokens") or 0)
     cached = int(metrics.get("cached_input_tokens") or 0)
     uncached = int(metrics.get("uncached_input_tokens") or max(0, input_tokens - cached))
+    output_tokens = int(metrics.get("output_tokens") or 0)
+    reasoning_output_tokens = int(metrics.get("reasoning_output_tokens") or 0)
     duration = float(metrics.get("duration_seconds") or 0.0)
     cache_ratio = (cached / input_tokens) if input_tokens else None
     uncached_share = (uncached / input_tokens) if input_tokens else None
@@ -100,7 +119,7 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
         findings.append({"code": "high_tool_call_count", "value": tool_calls})
     if uncached >= 50_000:
         findings.append({"code": "high_uncached_input_tokens", "value": uncached})
-    if tool_calls >= 40 and uncached < 10_000:
+    if tool_calls >= ROUNDTRIP_HEAVY_TOOL_CALL_THRESHOLD and uncached < 10_000:
         findings.append(
             {
                 "code": "roundtrip_heavy_cached_session",
@@ -115,6 +134,9 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
         "input_tokens": input_tokens,
         "cached_input_tokens": cached,
         "uncached_input_tokens": uncached,
+        "output_tokens": output_tokens,
+        "reasoning_output_tokens": reasoning_output_tokens,
+        "duration_seconds": duration,
         "cache_ratio": cache_ratio,
         "uncached_input_share": uncached_share,
         "tool_call_count": tool_calls,
@@ -122,6 +144,8 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
         "repo_path_count": len(repo_paths),
         "unique_repo_path_count": len(unique_repo_paths),
         "memory_read_count": memory_reads,
+        "roadmap_meta_read_count": roadmap_meta_reads,
+        "avoidable_context_read_count": avoidable_context_reads,
         "unscoped_adb_install_count": unscoped_adb_installs,
         "trace_processor_command_count": trace_processor_commands,
         "repeated_exact_commands": repeated,
