@@ -24,6 +24,15 @@ def first_goal_cycle(session_id: str = "019fd1da-cc5d-7db1-b880-a14be6111c38") -
     ]
 
 
+def attached_prompt_cycle(attachment: Path, session_id: str = "01a0a7b0-92a8-7ff1-bbda-1447e57b6695") -> list[dict[str, object]]:
+    return [
+        {"timestamp": "2026-09-16T00:49:22Z", "type": "session_meta", "payload": {"session_id": session_id}},
+        {"timestamp": "2026-09-16T00:49:23Z", "type": "turn_context", "payload": {"turn_id": "turn-attached", "model": "gpt-5.6-sol", "collaboration_mode": {"settings": {"reasoning_effort": "medium"}}}},
+        {"timestamp": "2026-09-16T00:49:24Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"text": f"Referenced pasted text files:\n- pasted text file: {attachment}. Read this file before continuing."}]}},
+        {"timestamp": "2026-09-16T00:49:25Z", "type": "event_msg", "payload": {"type": "task_complete", "turn_id": "turn-attached", "last_agent_message": "RESULT=PASS", "duration_ms": 1000}},
+    ]
+
+
 def goal_continuation() -> list[dict[str, object]]:
     return [
         {"timestamp": "2026-09-07T10:01:00Z", "type": "turn_context", "payload": {"turn_id": "turn-2", "model": "gpt-5.5", "collaboration_mode": {"settings": {"reasoning_effort": "medium"}}}},
@@ -41,6 +50,24 @@ class UsagePublisherRegressionTests(unittest.TestCase):
             with publisher.connect_state(root / "state") as con:
                 cycles, _events = publisher.parse_session(session, con)
             self.assertEqual(cycles[0]["metrics"]["prompt_id"], "681395")
+
+    def test_attached_prompt_is_indexed_from_codex_attachment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            attachments_root = root / ".codex/attachments"
+            attachment = attachments_root / "78a4850d-5cfe-4204-bb55-b890e7f8a5af/pasted-text-1.txt"
+            attachment.parent.mkdir(parents=True)
+            attachment.write_text("`PROMPT_ID=472913 | project_id=8 | model=GPT-5.6 Sol`\n", encoding="utf-8")
+            session = root / "session.jsonl"
+            write_jsonl(session, attached_prompt_cycle(attachment))
+            original_root = publisher.ATTACHMENTS_ROOT
+            publisher.ATTACHMENTS_ROOT = attachments_root
+            try:
+                with publisher.connect_state(root / "state") as con:
+                    cycles, _events = publisher.parse_session(session, con)
+            finally:
+                publisher.ATTACHMENTS_ROOT = original_root
+            self.assertEqual(cycles[0]["metrics"]["prompt_id"], "472913")
 
     def test_existing_cycle_fingerprint_stays_stable_when_rollout_grows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
