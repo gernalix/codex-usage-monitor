@@ -42,3 +42,4 @@ jobs:
           tests.test_prompt_efficiency_android
           tests.test_recent_prompt_efficiency
           tests.test_analyze_published_prompt
+          tests.test_assert_published_prompt
