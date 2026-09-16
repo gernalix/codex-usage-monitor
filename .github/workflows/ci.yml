@@ -34,3 +34,4 @@ jobs:
           tests.test_chat_dump_publisher
           tests.test_quota_notification_policy
           tests.test_uptime_kuma_push
+          tests.test_prompt_efficiency
