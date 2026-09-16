@@ -50,7 +50,14 @@ class PromptEfficiencyTests(unittest.TestCase):
             "repo_paths": ["/repo"] * 10,
         }
         events = [
-            {"tool_name": "exec_command", "content_text": json.dumps({"cmd": "adb install -r /tmp/46.apk"})},
+            {
+                "tool_name": "exec_command",
+                "content_text": json.dumps(
+                    {
+                        "cmd": "adb devices -l && for s in pixel emulator; do adb -s $s shell getprop ro.product.model; done && adb install -r /tmp/46.apk"
+                    }
+                ),
+            },
             {"tool_name": "exec_command", "content_text": json.dumps({"cmd": "which trace_processor_shell"})},
             {"tool_name": "exec_command", "content_text": json.dumps({"cmd": "find /opt -name trace_processor_shell"})},
             {"tool_name": "exec_command", "content_text": json.dumps({"cmd": "adb shell /tmp/trace_processor -Q 'select 1' trace.pftrace"})},
