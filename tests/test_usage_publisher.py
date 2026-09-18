@@ -189,7 +189,7 @@ class UsagePublisherTests(unittest.TestCase):
             self.assertTrue(legacy._source_snapshot_matches(state, "generation-a", snapshot or []))
             self.assertFalse(legacy._source_snapshot_matches(state, "generation-b", snapshot or []))
 
-    def test_publisher_telegram_skips_normal_pushes_and_compacts_missing_prompt_id(self) -> None:
+    def test_publisher_telemetry_never_sends_telegram(self) -> None:
         normal_cycle = {"metrics": {"chat_id": 178, "prompt_id": "417826", "cycle_key": "normal"}}
         missing_cycles = [
             {"metrics": {"chat_id": 178, "prompt_id": None, "cycle_key": f"missing-{index}"}}
@@ -197,14 +197,8 @@ class UsagePublisherTests(unittest.TestCase):
         ]
         with mock.patch.object(legacy.quota, "send_telegram") as send:
             self.assertTrue(publisher._legacy_send_batch_telegram([normal_cycle], False))
-            send.assert_not_called()
             self.assertTrue(publisher._legacy_send_batch_telegram(missing_cycles, False))
-        send.assert_called_once()
-        title, message = send.call_args.args[1:]
-        self.assertEqual(title, "Codex usage")
-        self.assertIn("10 cicli final-response senza PROMPT_ID", message)
-        self.assertIn("missing-0", message)
-        self.assertIn("missing-9", message)
+        send.assert_not_called()
 
     def test_result_status_mapping_accepts_explicit_terminal_result(self) -> None:
         self.assertEqual("PASS", publisher.status_from_final("PROMPT_ID=1\nRESULT=PASS"))
