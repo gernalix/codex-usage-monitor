@@ -216,17 +216,6 @@ class SessionArchiveTests(unittest.TestCase):
                 self.assertTrue(manifest["excluded"])
 
 
-def argparse_like(root: Path, **kwargs: Path) -> object:
-    class Args:
-        pass
-
-    args = Args()
-    args.archive_root = str(root)
-    args.source_root = str(kwargs.get("source_root", Path("/does/not/matter")))
-    args.codex_dir = str(kwargs.get("codex_dir", Path("/does/not/matter")))
-    return args
-
-
     def test_archive_db_context_closes_connection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "archive"
@@ -236,6 +225,17 @@ def argparse_like(root: Path, **kwargs: Path) -> object:
                 con.execute("SELECT 1")
             with self.assertRaises(sqlite3.ProgrammingError):
                 con.execute("SELECT 1")
+
+
+def argparse_like(root: Path, **kwargs: Path) -> object:
+    class Args:
+        pass
+
+    args = Args()
+    args.archive_root = str(root)
+    args.source_root = str(kwargs.get("source_root", Path("/does/not/matter")))
+    args.codex_dir = str(kwargs.get("codex_dir", Path("/does/not/matter")))
+    return args
 
 
 if __name__ == "__main__":
