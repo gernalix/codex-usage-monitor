@@ -21,6 +21,16 @@ from typing import Any, Iterable
 
 
 VERSION = "2026.08.05"
+class _ClosingConnection(sqlite3.Connection):
+    """Commit/rollback like sqlite3.Connection and close on context exit."""
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool | None:
+        try:
+            return super().__exit__(exc_type, exc, tb)
+        finally:
+            self.close()
+
+
 APP_NAME = "codex-session-archive"
 DEFAULT_CODEX_DIR = Path.home() / ".codex"
 DEFAULT_SOURCE_ROOT = DEFAULT_CODEX_DIR / "sessions"
@@ -109,7 +119,7 @@ def sqlite_has_table(path: Path, table: str) -> bool:
         return False
     uri = f"file:{path}?mode=ro"
     try:
-        with sqlite3.connect(uri, uri=True, timeout=15) as con:
+        with sqlite3.connect(uri, uri=True, timeout=15, factory=_ClosingConnection) as con:
             row = con.execute("SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name=?", (table,)).fetchone()
             return row is not None
     except sqlite3.Error:
@@ -290,7 +300,7 @@ def connect_db(root: Path) -> sqlite3.Connection:
     ensure_private_dir(root)
     db_path = root / "index/archive.sqlite"
     ensure_private_dir(db_path.parent)
-    con = sqlite3.connect(db_path, timeout=30)
+    con = sqlite3.connect(db_path, timeout=30, factory=_ClosingConnection)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA foreign_keys=ON")
