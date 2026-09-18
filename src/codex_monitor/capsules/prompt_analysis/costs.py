@@ -1,16 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-class _ClosingConnection(sqlite3.Connection):
-    """Commit/rollback and close SQLite connections used as context managers."""
-
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool | None:
-        try:
-            return super().__exit__(exc_type, exc, tb)
-        finally:
-            self.close()
-
-
 import argparse
 import csv
 import datetime as dt
@@ -19,6 +9,16 @@ from pathlib import Path
 import re
 import sqlite3
 from typing import Any
+
+
+class _ClosingConnection(sqlite3.Connection):
+    """Commit/rollback and close SQLite connections used as context managers."""
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool | None:
+        try:
+            return super().__exit__(exc_type, exc, tb)
+        finally:
+            self.close()
 
 DEFAULT_SOURCE_ROOT = Path.home() / ".codex/sessions"
 DEFAULT_ARCHIVE_ROOT = Path.home() / ".local/share/codex-session-archive"
