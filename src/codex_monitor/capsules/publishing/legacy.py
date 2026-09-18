@@ -26,6 +26,7 @@ DEFAULT_STATE_DIR = Path.home() / ".local/state/codex-usage-publisher"
 DEFAULT_DATA_REPO = Path.home() / "projects/codex-usage"
 DEFAULT_DATA_REMOTE = "https://github.com/gernalix/codex-usage"
 DEFAULT_QUOTA_DB = Path.home() / ".local/share/codex-usage-monitor/codex_usage_monitor.db"
+SOURCE_SNAPSHOT_SCHEMA = 1
 
 
 class PublisherError(RuntimeError):
@@ -141,6 +142,74 @@ def connect_state(state_dir: Path) -> sqlite3.Connection:
     )
     con.commit()
     return con
+
+
+def _source_snapshot(paths: list[Path]) -> list[dict[str, int | str]] | None:
+    rows: list[dict[str, int | str]] = []
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        rows.append(
+            {
+                "path": str(path),
+                "size": int(stat.st_size),
+                "mtime_ns": int(stat.st_mtime_ns),
+                "ctime_ns": int(stat.st_ctime_ns),
+            }
+        )
+    return rows
+
+
+def _source_snapshot_path(state_dir: Path) -> Path:
+    return state_dir / "source-snapshot.json"
+
+
+def _source_snapshot_matches(
+    state_dir: Path,
+    generation: str,
+    rows: list[dict[str, int | str]],
+) -> bool:
+    path = _source_snapshot_path(state_dir)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.get("schema") == SOURCE_SNAPSHOT_SCHEMA
+        and payload.get("generation") == generation
+        and payload.get("files") == rows
+    )
+
+
+def _write_source_snapshot(
+    state_dir: Path,
+    generation: str,
+    rows: list[dict[str, int | str]],
+) -> None:
+    atomic_write(
+        _source_snapshot_path(state_dir),
+        json.dumps(
+            {
+                "schema": SOURCE_SNAPSHOT_SCHEMA,
+                "generation": generation,
+                "files": rows,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+        )
+        + "\n",
+    )
+
+
+def _publisher_has_pending_state(con: sqlite3.Connection) -> bool:
+    row = con.execute(
+        "SELECT 1 FROM cycles WHERE published_commit IS NULL OR telegram_sent=0 LIMIT 1"
+    ).fetchone()
+    return row is not None
 
 
 def source_sha(path: Path) -> str:
@@ -586,6 +655,7 @@ def command_run(
     send_batch_telegram_fn=send_batch_telegram,
     git_ok_fn=git_ok,
     utc_stamp_fn=utc_stamp,
+    source_generation: str | None = None,
 ) -> int:
     assert_private_repo_fn(args.remote)
     state_dir = Path(args.state_dir).expanduser()
@@ -594,9 +664,34 @@ def command_run(
     quota_db = Path(args.quota_db).expanduser()
     with ExclusiveLock(state_dir / "publisher.lock"):
         with connect_state_fn(state_dir) as con:
+            source_paths = sorted(source_root.glob("**/*.jsonl"))
+            source_snapshot = _source_snapshot(source_paths)
+            if (
+                source_generation
+                and source_snapshot is not None
+                and not _publisher_has_pending_state(con)
+                and _source_snapshot_matches(state_dir, source_generation, source_snapshot)
+            ):
+                counts = con.execute(
+                    "SELECT COUNT(*) cycles, SUM(prompt_id IS NOT NULL) prompt_ids FROM cycles"
+                ).fetchone()
+                chats = con.execute("SELECT COUNT(*) chats FROM session_chats").fetchone()
+                print(
+                    json.dumps(
+                        {
+                            "status": "noop_unchanged_sources",
+                            "chats": int(chats["chats"] or 0),
+                            "cycles": int(counts["cycles"] or 0),
+                            "prompt_ids": int(counts["prompt_ids"] or 0),
+                        },
+                        sort_keys=True,
+                    )
+                )
+                return 0
+
             cycles: list[dict[str, Any]] = []
             chat_events: dict[int, list[dict[str, Any]]] = {}
-            for path in sorted(source_root.glob("**/*.jsonl")):
+            for path in source_paths:
                 parsed, events = parse_session_fn(path, con)
                 for cycle in parsed:
                     cycles.append(cycle)
@@ -654,8 +749,12 @@ def command_run(
                     send_batch_telegram_fn(retry_cycles, args.dry_run_telegram)
                     con.execute("UPDATE cycles SET telegram_sent=1 WHERE cycle_key IN (%s)" % ",".join("?" for _ in retry_keys), tuple(retry_keys))
                     con.commit()
+                    if source_generation and source_snapshot is not None:
+                        _write_source_snapshot(state_dir, source_generation, source_snapshot)
                     print(json.dumps({"status": "telegram_retried", "chats": len({c["metrics"]["chat_id"] for c in retry_cycles}), "cycles": len(retry_cycles)}, sort_keys=True))
                     return 0
+                if source_generation and source_snapshot is not None:
+                    _write_source_snapshot(state_dir, source_generation, source_snapshot)
                 print(json.dumps({"status": "noop", "chats": len(chat_events), "cycles": len(cycles), "prompt_ids": len({c["metrics"].get("prompt_id") for c in cycles if c["metrics"].get("prompt_id")})}, sort_keys=True))
                 return 0
             if args.no_push:
@@ -695,6 +794,8 @@ def command_run(
                 send_batch_telegram_fn(pending_cycles, args.dry_run_telegram)
                 con.execute("UPDATE cycles SET telegram_sent=1 WHERE cycle_key IN (%s)" % ",".join("?" for _ in changed_cycle_keys), tuple(changed_cycle_keys))
                 con.commit()
+            if source_generation and source_snapshot is not None:
+                _write_source_snapshot(state_dir, source_generation, source_snapshot)
             print(json.dumps({"status": "published", "commit": commit, "chats": len(chat_events), "cycles": len(cycles), "published_cycles": len(pending_cycles)}, sort_keys=True))
             return 0
 
