@@ -131,7 +131,7 @@ def backup_sqlite(src: Path, dst: Path) -> None:
     if dst.exists():
         dst.unlink()
     src_uri = f"file:{src}?mode=ro"
-    with sqlite3.connect(src_uri, uri=True, timeout=30) as source, sqlite3.connect(dst) as target:
+    with sqlite3.connect(src_uri, uri=True, timeout=30, factory=_ClosingConnection) as source, sqlite3.connect(dst, factory=_ClosingConnection) as target:
         source.backup(target)
     os.chmod(dst, 0o600)
 
@@ -668,7 +668,7 @@ def export_threads_metadata(root: Path, codex_dir: Path) -> bool:
     rows: list[dict[str, Any]] = []
     uri = f"file:{db}?mode=ro"
     try:
-        with sqlite3.connect(uri, uri=True, timeout=15) as con:
+        with sqlite3.connect(uri, uri=True, timeout=15, factory=_ClosingConnection) as con:
             con.row_factory = sqlite3.Row
             for row in con.execute("SELECT * FROM threads ORDER BY updated_at DESC"):
                 item = dict(row)
@@ -1045,7 +1045,7 @@ def export_quota_jsonl(staging_root: Path, usage_db: Path, manifest: dict[str, A
         "rate_limit_history.jsonl": "SELECT * FROM rate_limit_history",
         "quota_temporal_metrics.jsonl": "SELECT * FROM quota_temporal_metrics",
     }
-    with sqlite3.connect(uri, uri=True, timeout=30) as con:
+    with sqlite3.connect(uri, uri=True, timeout=30, factory=_ClosingConnection) as con:
         con.row_factory = sqlite3.Row
         for name, sql in exports.items():
             try:
