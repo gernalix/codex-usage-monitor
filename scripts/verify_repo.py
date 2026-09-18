@@ -11,12 +11,41 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def run(cmd: list[str]) -> int:
+RESOURCE_WARNING_MARKERS = (
+    "ResourceWarning:",
+    "Exception ignored while finalizing database connection",
+)
+
+
+def run(cmd: list[str], *, fail_on_resource_warning: bool = False) -> int:
     env = dict(os.environ)
     src = str(ROOT / "src")
     env["PYTHONPATH"] = src if not env.get("PYTHONPATH") else f"{src}{os.pathsep}{env['PYTHONPATH']}"
-    result = subprocess.run(cmd, cwd=ROOT, check=False, env=env)
-    return int(result.returncode)
+
+    if not fail_on_resource_warning:
+        result = subprocess.run(cmd, cwd=ROOT, check=False, env=env)
+        return int(result.returncode)
+
+    process = subprocess.Popen(
+        cmd,
+        cwd=ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
+    )
+    saw_resource_warning = False
+    assert process.stdout is not None
+    for line in process.stdout:
+        sys.stdout.write(line)
+        if any(marker in line for marker in RESOURCE_WARNING_MARKERS):
+            saw_resource_warning = True
+    returncode = int(process.wait())
+    if returncode == 0 and saw_resource_warning:
+        print("VERIFY_RESOURCE_WARNING=FAIL", file=sys.stderr)
+        return 86
+    return returncode
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -32,6 +61,11 @@ def main(argv: list[str] | None = None) -> int:
         "--skip-diff-check",
         action="store_true",
         help="Skip git diff --check (useful outside a Git checkout).",
+    )
+    parser.add_argument(
+        "--fail-on-resource-warning",
+        action="store_true",
+        help="Fail verification when ResourceWarning/unclosed SQLite diagnostics appear.",
     )
     args = parser.parse_args(argv)
 
@@ -53,7 +87,11 @@ def main(argv: list[str] | None = None) -> int:
             "test_*.py",
         ]
 
-    rc = run(test_cmd)
+    strict_resource_warnings = (
+        args.fail_on_resource_warning
+        or "ResourceWarning" in os.environ.get("PYTHONWARNINGS", "")
+    )
+    rc = run(test_cmd, fail_on_resource_warning=strict_resource_warnings)
     if rc != 0:
         return rc
 
