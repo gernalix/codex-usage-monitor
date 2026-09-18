@@ -17,6 +17,10 @@ _EXPLICIT_STATUS_RE = re.compile(
     rf"\b(?:RESULT|STATUS|VERIFICA|VERIFICATION|ESITO)\s*[:=]\s*[`*_~]*\s*(?:(?:goal\s+marcato|goal\s+marked|status)\s+)?({_STATUS_ALTERNATION})\b",
     re.I,
 )
+_FIRST_LINE_STATUS_RE = re.compile(
+    rf"^({_STATUS_ALTERNATION})\b(?:\s*[:—–-]\s*.*)?$",
+    re.I,
+)
 
 
 def status_from_final(text: str) -> str:
@@ -28,5 +32,8 @@ def status_from_final(text: str) -> str:
 
     first = next((line.strip() for line in normalized.splitlines() if line.strip()), "")
     first = first.strip("`*_~ ")
+    match = _FIRST_LINE_STATUS_RE.match(first)
+    if match:
+        return match.group(1).upper()
     first = first.upper()
     return first if first in TERMINAL_STATUSES else "UNKNOWN"
