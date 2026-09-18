@@ -1,0 +1,26 @@
+name: one-shot-delete-obsolete-branches
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete obsolete branches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}/git/refs/heads"
+          for ref in \
+            "chatgpt%2Ftelemetry-efficiency-current-main" \
+            "chatgpt%2Ftoken-efficiency-hardening" \
+            "fix%2Fprompt-analysis-cycle-costs"; do
+            curl -fsS -X DELETE \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "${api}/${ref}"
+          done
