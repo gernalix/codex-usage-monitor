@@ -15,6 +15,8 @@ class PublishingStatusTests(unittest.TestCase):
 
     def test_existing_terminal_statuses_remain_supported(self) -> None:
         self.assertEqual("PASS", api.status_from_final("PASS\nok"))
+        self.assertEqual("BLOCKED", api.status_from_final("BLOCKED: historical_missing"))
+        self.assertEqual("FAIL", api.status_from_final("FAIL — runtime gate failed"))
         self.assertEqual("BLOCKED", api.status_from_final("RESULT: `BLOCKED`"))
         self.assertEqual("WAITING_FOR_EVENT", api.status_from_final("STATUS: WAITING_FOR_EVENT"))
         self.assertEqual("UNKNOWN", api.status_from_final("No explicit terminal status."))
