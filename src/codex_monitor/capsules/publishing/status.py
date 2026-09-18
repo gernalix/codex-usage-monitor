@@ -22,6 +22,35 @@ _FIRST_LINE_STATUS_RE = re.compile(
     re.I,
 )
 
+_REPORT_GATE_RE = re.compile(
+    r"^(?:[-*]\\s*)?(?:TEST(?:S)?|UNIT|SMOKE|DEPLOY|RUN(?:S)?|COMANDO\\s+REALE|REAL\\s+COMMAND|VERIFICA|VERIFICATION|CHECK(?:S)?)"
+    r"\\s*[:=]\\s*[\`*_~]*\\s*(PASS|FAIL|BLOCKED|NOT_RUN|UNKNOWN)\\b",
+    re.I,
+)
+_REPORT_CLEAR_RE = re.compile(
+    r"^(?:[-*]\\s*)?(?:PROBLEMI\\s+RESIDUI|RESIDUAL\\s+ISSUES|BLOCKER)\\s*[:=]\\s*(?:NESSUNO|NONE)\\b",
+    re.I,
+)
+
+
+def _status_from_structured_report(text: str) -> str:
+    pass_count = 0
+    has_clear_residuals = False
+    has_nonpass_gate = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        gate = _REPORT_GATE_RE.match(line)
+        if gate:
+            if gate.group(1).upper() == "PASS":
+                pass_count += 1
+            else:
+                has_nonpass_gate = True
+        if _REPORT_CLEAR_RE.match(line):
+            has_clear_residuals = True
+    if pass_count >= 2 and has_clear_residuals and not has_nonpass_gate:
+        return "PASS"
+    return "UNKNOWN"
+
 
 def status_from_final(text: str) -> str:
     """Extract the terminal task status from a Codex final response."""
