@@ -252,6 +252,28 @@ class UsagePublisherTests(unittest.TestCase):
                 )
             )
 
+    def test_terminal_marker_split_at_snapshot_boundary_forces_rescan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            session = root / "sessions" / "active.jsonl"
+            session.parent.mkdir(parents=True, exist_ok=True)
+            session.write_bytes(b'{"payload":{"type":"task_')
+            before = legacy._source_snapshot([session])
+            self.assertIsNotNone(before)
+            legacy._write_source_snapshot(state, "generation-a", before or [])
+
+            with session.open("ab") as handle:
+                handle.write(b'complete"}}\n')
+            after = legacy._source_snapshot([session])
+            self.assertIsNotNone(after)
+
+            self.assertFalse(
+                legacy._source_snapshot_can_advance_without_rescan(
+                    state, "generation-a", after or []
+                )
+            )
+
     def test_nonterminal_append_uses_publisher_fast_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
