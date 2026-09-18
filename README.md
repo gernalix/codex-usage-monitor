@@ -129,7 +129,9 @@ The publisher is a Fedora-local process because it consumes native Codex rollout
 
 Publisher telemetry is **passive by default**. Missing `PROMPT_ID` cycles are still preserved under the unassigned usage data and can be diagnosed later, but they do not generate Telegram alerts. Telegram remains reserved for actionable quota/runtime signals handled by the dedicated monitor rather than routine publication metadata.
 
-Publisher invocations share one filesystem lock. `run` now waits up to 30 seconds by default for a concurrent timer/manual invocation to finish instead of immediately returning `status=locked`; use `run --wait-lock-seconds 0` only when an immediate non-waiting probe is explicitly desired. This keeps runtime validation from failing just because the periodic timer happened to start at the same moment.
+Publisher invocations share one filesystem lock. `run` waits up to 30 seconds by default for a concurrent timer/manual invocation to finish instead of immediately returning `status=locked`; use `run --wait-lock-seconds 0` only when an immediate non-waiting probe is explicitly desired.
+
+The source fast-path is append-aware. If a live Codex rollout only grows with non-terminal reasoning/tool/token events, the publisher inspects just the appended bytes, advances its source snapshot and returns `status=noop_unchanged_sources` without reparsing historical sessions. A new `task_complete`/`turn_aborted`, file replacement/truncation, generation change or pending unpublished state still forces the full parser. This prevents an active Codex conversation from invalidating the fast-path on every tool round-trip.
 
 ## Complete redacted chat dumps
 
@@ -175,7 +177,7 @@ Use the repository verification helper for local and Codex checks; it injects th
 python3 scripts/verify_repo.py tests.test_publishing_status tests.test_publication_semantic_backfill
 ```
 
-Targeted `python3 -m unittest tests.<module>` runs from the repository root are also source-layout safe. When verification and deployment share one shell call, use fail-fast shell semantics (`set -euo pipefail` or `&&`) so a failed test can never fall through to deployment.
+Targeted `python3 -m unittest tests.<module>` runs from the repository root are also source-layout safe. When ResourceWarnings are part of the acceptance gate, use `scripts/verify_repo.py --fail-on-resource-warning ...`; the helper treats unclosed-SQLite diagnostics as a real verification failure even when CPython emits them from finalizers without a non-zero unittest exit code. When verification and deployment share one shell call, use fail-fast shell semantics (`set -euo pipefail` or `&&`) so a failed test can never fall through to deployment.
 
 ## Deployment rule
 
