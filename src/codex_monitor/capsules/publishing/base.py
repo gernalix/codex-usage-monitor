@@ -37,6 +37,7 @@ from .legacy import (
 
 VERSION = "2026.09.16"
 FINGERPRINT_SCHEMA = 3
+SOURCE_SCAN_GENERATION = f"fingerprint-schema-{FINGERPRINT_SCHEMA}"
 GUARD_METADATA_KEYS = {"repo_project", "repo_paths", "repo_projects", "repo_write_projects", "repo_path_kinds"}
 _GOAL_PREFIX = '<codex_internal_context source="goal">'
 ATTACHMENTS_ROOT = Path.home() / ".codex/attachments"
@@ -637,6 +638,7 @@ def command_run(
             send_batch_telegram_fn=send_batch_telegram_fn,
             git_ok_fn=git_ok,
             utc_stamp_fn=utc_stamp,
+            source_generation=SOURCE_SCAN_GENERATION,
         )
     )
     if result == 0 and _guard_candidate_cycles:
