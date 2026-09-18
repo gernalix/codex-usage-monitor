@@ -166,8 +166,27 @@ class UsagePublisherTests(unittest.TestCase):
             with mock.patch.object(publisher, "assert_private_repo"), mock.patch.object(publisher, "ensure_repo"), mock.patch.object(publisher, "git_ok") as git_ok, mock.patch.object(publisher, "send_batch_telegram", return_value=True) as send:
                 git_ok.side_effect = lambda cmd, cwd, timeout=120: publisher.run(cmd, cwd)
                 self.assertEqual(publisher.main(argv), 0)
-                self.assertEqual(publisher.main(argv), 0)
             self.assertEqual(send.call_count, 1)
+
+            with mock.patch.object(publisher, "assert_private_repo"), mock.patch.object(
+                publisher, "parse_session", side_effect=AssertionError("unchanged source was reparsed")
+            ), mock.patch.object(
+                publisher, "ensure_repo", side_effect=AssertionError("noop source run touched data repo")
+            ):
+                self.assertEqual(publisher.main(argv), 0)
+
+    def test_source_snapshot_generation_change_forces_rescan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            session = root / "sessions" / "s.jsonl"
+            write_jsonl(session, session_rows("019fd1da-cc5d-7db1-b880-a14be6111c38"))
+            paths = [session]
+            snapshot = legacy._source_snapshot(paths)
+            self.assertIsNotNone(snapshot)
+            legacy._write_source_snapshot(state, "generation-a", snapshot or [])
+            self.assertTrue(legacy._source_snapshot_matches(state, "generation-a", snapshot or []))
+            self.assertFalse(legacy._source_snapshot_matches(state, "generation-b", snapshot or []))
 
     def test_publisher_telegram_skips_normal_pushes_and_compacts_missing_prompt_id(self) -> None:
         normal_cycle = {"metrics": {"chat_id": 178, "prompt_id": "417826", "cycle_key": "normal"}}
