@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+class _ClosingConnection(sqlite3.Connection):
+    """Commit/rollback and close SQLite connections used as context managers."""
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool | None:
+        try:
+            return super().__exit__(exc_type, exc, tb)
+        finally:
+            self.close()
+
+
 import argparse
 import csv
 import datetime as dt
@@ -374,7 +384,7 @@ def write_outputs(rows: list[dict[str, Any]], prompt_rows: list[dict[str, Any]],
              ROUND(AVG(quota_delta_points),3) avg_quota_delta_points
       FROM prompt_costs GROUP BY model, reasoning_effort;
     """
-    with sqlite3.connect(db) as con:
+    with sqlite3.connect(db, factory=_ClosingConnection) as con:
         con.executescript(schema)
         columns = {row[1] for row in con.execute("PRAGMA table_info(prompt_costs)")}
         if "completion_state" not in columns:
