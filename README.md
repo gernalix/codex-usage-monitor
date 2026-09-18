@@ -163,6 +163,16 @@ Default output:
 
 The bundle contains the usage databases/CSVs, redacted normalized session JSONL, per-session manifests and archive metadata. Raw rollouts, raw gzip archives, native Codex auth/state databases, shell snapshots, locks and secrets are excluded.
 
+## Repository verification
+
+Use the repository verification helper for local and Codex checks; it injects the src-layout path and keeps targeted unittest runs reproducible:
+
+```bash
+python3 scripts/verify_repo.py tests.test_publishing_status tests.test_publication_semantic_backfill
+```
+
+Targeted `python3 -m unittest tests.<module>` runs from the repository root are also source-layout safe. When verification and deployment share one shell call, use fail-fast shell semantics (`set -euo pipefail` or `&&`) so a failed test can never fall through to deployment.
+
 ## Deployment rule
 
 Production Fedora runtime must be deployed from a **clean, upstream-synchronized** `main` using `deploy_runtime.py`. The immutable runtime lives under:
