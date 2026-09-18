@@ -21,14 +21,13 @@ _FIRST_LINE_STATUS_RE = re.compile(
     rf"^({_STATUS_ALTERNATION})\b(?:\s*[:—–-]\s*.*)?$",
     re.I,
 )
-
 _REPORT_GATE_RE = re.compile(
-    r"^(?:[-*]\\s*)?(?:TEST(?:S)?|UNIT|SMOKE|DEPLOY|RUN(?:S)?|COMANDO\\s+REALE|REAL\\s+COMMAND|VERIFICA|VERIFICATION|CHECK(?:S)?)"
-    r"\\s*[:=]\\s*[\`*_~]*\\s*(PASS|FAIL|BLOCKED|NOT_RUN|UNKNOWN)\\b",
+    r"^(?:[-*]\s*)?(?:TEST(?:S)?|UNIT|SMOKE|DEPLOY|RUN(?:S)?|COMANDO\s+REALE|REAL\s+COMMAND|VERIFICA|VERIFICATION|CHECK(?:S)?)"
+    r"\s*[:=]\s*[`*_~]*\s*(PASS|FAIL|BLOCKED|NOT_RUN|UNKNOWN)\b",
     re.I,
 )
 _REPORT_CLEAR_RE = re.compile(
-    r"^(?:[-*]\\s*)?(?:PROBLEMI\\s+RESIDUI|RESIDUAL\\s+ISSUES|BLOCKER)\\s*[:=]\\s*(?:NESSUNO|NONE)\\b",
+    r"^(?:[-*]\s*)?(?:PROBLEMI\s+RESIDUI|RESIDUAL\s+ISSUES|BLOCKER)\s*[:=]\s*(?:NESSUNO|NONE)\b",
     re.I,
 )
 
@@ -65,4 +64,6 @@ def status_from_final(text: str) -> str:
     if match:
         return match.group(1).upper()
     first = first.upper()
-    return first if first in TERMINAL_STATUSES else "UNKNOWN"
+    if first in TERMINAL_STATUSES:
+        return first
+    return _status_from_structured_report(normalized)
