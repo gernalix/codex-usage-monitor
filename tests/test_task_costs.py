@@ -137,6 +137,41 @@ class TaskCostTests(unittest.TestCase):
             self.assertEqual(prompts[0]["prompt_id"], "917364")
             self.assertEqual(prompts[0]["total_tokens"], 13)
 
+    def test_native_user_message_accepts_markdown_escaped_prompt_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout.jsonl"
+            write_jsonl(
+                path,
+                [
+                    {"timestamp": "2026-09-18T16:54:51Z", "type": "session_meta", "payload": {"session_id": "s-escaped"}},
+                    {
+                        "timestamp": "2026-09-18T16:54:52Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": r"PROMPT\_ID=918274 | project\_id=49"}],
+                        },
+                    },
+                    token_event(
+                        "2026-09-18T16:54:53Z",
+                        input_tokens=10,
+                        cached=8,
+                        output=2,
+                        reasoning=1,
+                        total=12,
+                        quota=1.0,
+                    ),
+                    {"timestamp": "2026-09-18T16:54:54Z", "type": "event_msg", "payload": {"type": "task_complete"}},
+                ],
+            )
+
+            session, prompts = costs.analyze_with_prompts(path)
+
+            self.assertEqual(session["prompt_ids"], "918274")
+            self.assertEqual(len(prompts), 1)
+            self.assertEqual(prompts[0]["prompt_id"], "918274")
+
     def test_prompt_selection_can_disambiguate_duplicate_prompt_ids(self) -> None:
         rows = [
             {"prompt_id": "917364", "completion_state": "task_complete", "model": "gpt-5.5", "reasoning_effort": "medium", "first_timestamp_utc": "2026-09-13T11:00:00Z", "source_path": "a", "prompt_seq": 1},
