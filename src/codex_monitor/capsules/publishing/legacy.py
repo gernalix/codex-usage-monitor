@@ -295,13 +295,17 @@ def _source_snapshot_can_advance_without_rescan(
             with Path(path_text).open("rb") as handle:
                 handle.seek(old_size)
                 remaining = new_size - old_size
+                overlap = max(len(marker) for marker in _TERMINAL_APPEND_MARKERS) - 1
+                tail = b""
                 while remaining > 0:
                     chunk = handle.read(min(1024 * 1024, remaining))
                     if not chunk:
                         return False
                     remaining -= len(chunk)
-                    if any(marker in chunk for marker in _TERMINAL_APPEND_MARKERS):
+                    probe = tail + chunk
+                    if any(marker in probe for marker in _TERMINAL_APPEND_MARKERS):
                         return False
+                    tail = probe[-overlap:] if overlap else b""
         except OSError:
             return False
 
