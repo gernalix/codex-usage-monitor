@@ -649,27 +649,7 @@ def export_repo(repo: Path, cycles: list[dict[str, Any]], chat_events_by_id: dic
 
 
 def send_batch_telegram(cycles: list[dict[str, Any]], dry_run: bool) -> bool:
-    missing_by_chat: dict[int, list[str]] = {}
-    for cycle in cycles:
-        if cycle["metrics"].get("prompt_id"):
-            continue
-        missing_by_chat.setdefault(int(cycle["metrics"]["chat_id"]), []).append(str(cycle["metrics"]["cycle_key"]))
-    if not missing_by_chat:
-        return True
-    if len(missing_by_chat) == 1:
-        chat_id, cycle_keys = next(iter(missing_by_chat.items()))
-        first_key = cycle_keys[0]
-        last_key = cycle_keys[-1]
-        message = (
-            f"Anomalia Codex usage: {len(cycle_keys)} cicli final-response senza PROMPT_ID nella chat {chat_id}.\n"
-            f"Primo ciclo: {first_key}\nUltimo ciclo: {last_key}"
-        )
-    else:
-        message = "; ".join(f"chat {chat}: {len(keys)} cicli senza PROMPT_ID" for chat, keys in sorted(missing_by_chat.items()))
-    if dry_run:
-        print(json.dumps({"telegram": "dry_run", "message": message}, sort_keys=True))
-        return True
-    quota.send_telegram(quota.build_config(None), "Codex usage", message)
+    """Keep publisher telemetry passive; notification-worthy signals live elsewhere."""
     return True
 
 
