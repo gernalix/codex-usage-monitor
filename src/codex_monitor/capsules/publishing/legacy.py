@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any
 
 from codex_monitor.capsules.session_archive import api as archive
@@ -33,23 +34,52 @@ class PublisherError(RuntimeError):
     pass
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """Preserve sqlite transaction context semantics and close on context exit."""
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool | None:
+        try:
+            return super().__exit__(exc_type, exc, tb)
+        finally:
+            self.close()
+
+
 class ExclusiveLock:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, wait_seconds: float = 0.0, poll_seconds: float = 0.1):
         self.path = path
+        self.wait_seconds = max(0.0, float(wait_seconds))
+        self.poll_seconds = max(0.01, float(poll_seconds))
         self.handle: Any = None
 
     def __enter__(self) -> "ExclusiveLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.handle = self.path.open("w", encoding="utf-8")
-        fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        self.handle.write(f"{os.getpid()}\n")
-        self.handle.flush()
-        return self
+        deadline = time.monotonic() + self.wait_seconds
+        try:
+            while True:
+                try:
+                    fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise
+                    time.sleep(min(self.poll_seconds, remaining))
+            self.handle.write(f"{os.getpid()}\n")
+            self.handle.flush()
+            return self
+        except Exception:
+            self.handle.close()
+            self.handle = None
+            raise
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         if self.handle:
-            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
-            self.handle.close()
+            try:
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                self.handle.close()
+                self.handle = None
 
 
 def utc_stamp(value: dt.datetime | None = None) -> str:
@@ -113,7 +143,7 @@ def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 def connect_state(state_dir: Path) -> sqlite3.Connection:
     state_dir.mkdir(parents=True, exist_ok=True)
     db = state_dir / "publisher.sqlite"
-    con = sqlite3.connect(db, timeout=30)
+    con = sqlite3.connect(db, timeout=30, factory=_ClosingConnection)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA foreign_keys=ON")
@@ -662,7 +692,10 @@ def command_run(
     source_root = Path(args.source_root).expanduser()
     repo = Path(args.data_repo).expanduser()
     quota_db = Path(args.quota_db).expanduser()
-    with ExclusiveLock(state_dir / "publisher.lock"):
+    with ExclusiveLock(
+        state_dir / "publisher.lock",
+        wait_seconds=float(getattr(args, "wait_lock_seconds", 0.0) or 0.0),
+    ):
         with connect_state_fn(state_dir) as con:
             source_paths = sorted(source_root.glob("**/*.jsonl"))
             source_snapshot = _source_snapshot(source_paths)
@@ -819,6 +852,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_p = sub.add_parser("run")
     run_p.add_argument("--no-push", action="store_true")
     run_p.add_argument("--dry-run-telegram", action="store_true")
+    run_p.add_argument(
+        "--wait-lock-seconds",
+        type=float,
+        default=30.0,
+        help="Wait up to this many seconds for another publisher run to release its lock (default: 30).",
+    )
     run_p.set_defaults(func=command_run)
     sub.add_parser("status").set_defaults(func=command_status)
     return parser
