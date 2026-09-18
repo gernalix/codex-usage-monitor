@@ -24,7 +24,7 @@ from .base import subprocess
 # flow through the normal pending/publish transaction exactly once. Unlike the old
 # fingerprint-schema migration shortcut, state is not advanced before Git publish
 # succeeds, so a failed backfill remains retryable.
-PUBLICATION_SEMANTICS_VERSION = 2
+PUBLICATION_SEMANTICS_VERSION = 3
 _RAW_CYCLE_FINGERPRINT = _base._fingerprint
 
 
