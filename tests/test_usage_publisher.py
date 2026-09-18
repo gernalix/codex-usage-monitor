@@ -200,6 +200,94 @@ class UsagePublisherTests(unittest.TestCase):
             self.assertTrue(legacy._source_snapshot_matches(state, "generation-a", snapshot or []))
             self.assertFalse(legacy._source_snapshot_matches(state, "generation-b", snapshot or []))
 
+    def test_nonterminal_append_can_advance_source_snapshot_without_rescan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            session = root / "sessions" / "active.jsonl"
+            write_jsonl(
+                session,
+                [
+                    {"timestamp": "2026-09-18T10:00:00Z", "type": "turn_context", "payload": {"turn_id": "turn-1"}},
+                ],
+            )
+            before = legacy._source_snapshot([session])
+            self.assertIsNotNone(before)
+            legacy._write_source_snapshot(state, "generation-a", before or [])
+
+            with session.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"timestamp": "2026-09-18T10:00:01Z", "type": "event_msg", "payload": {"type": "token_count"}}) + "\n")
+            after = legacy._source_snapshot([session])
+            self.assertIsNotNone(after)
+
+            self.assertTrue(
+                legacy._source_snapshot_can_advance_without_rescan(
+                    state, "generation-a", after or []
+                )
+            )
+
+    def test_terminal_append_forces_source_rescan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            session = root / "sessions" / "active.jsonl"
+            write_jsonl(
+                session,
+                [
+                    {"timestamp": "2026-09-18T10:00:00Z", "type": "turn_context", "payload": {"turn_id": "turn-1"}},
+                ],
+            )
+            before = legacy._source_snapshot([session])
+            self.assertIsNotNone(before)
+            legacy._write_source_snapshot(state, "generation-a", before or [])
+
+            with session.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"timestamp": "2026-09-18T10:00:02Z", "type": "event_msg", "payload": {"type": "task_complete"}}) + "\n")
+            after = legacy._source_snapshot([session])
+            self.assertIsNotNone(after)
+
+            self.assertFalse(
+                legacy._source_snapshot_can_advance_without_rescan(
+                    state, "generation-a", after or []
+                )
+            )
+
+    def test_nonterminal_append_uses_publisher_fast_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "sessions"
+            repo = root / "repo"
+            session = source / "s.jsonl"
+            write_jsonl(session, session_rows("019fd1da-cc5d-7db1-b880-a14be6111c38"))
+            publisher.run(["git", "init", "-b", "main", str(repo)])
+            publisher.run(["git", "config", "user.email", "test@example.invalid"], repo)
+            publisher.run(["git", "config", "user.name", "Test"], repo)
+            argv = [
+                "--source-root", str(source),
+                "--state-dir", str(root / "state"),
+                "--data-repo", str(repo),
+                "run",
+            ]
+            with mock.patch.object(publisher, "assert_private_repo"), \
+                 mock.patch.object(publisher, "ensure_repo"), \
+                 mock.patch.object(publisher, "git_ok") as git_ok:
+                git_ok.side_effect = lambda cmd, cwd, timeout=120: publisher.run(cmd, cwd)
+                self.assertEqual(publisher.main(argv), 0)
+
+            with session.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({
+                    "timestamp": "2026-09-05T10:00:07Z",
+                    "type": "event_msg",
+                    "payload": {"type": "token_count", "info": {}},
+                }) + "\n")
+
+            with mock.patch.object(
+                publisher, "parse_session", side_effect=AssertionError("nonterminal append was reparsed")
+            ), mock.patch.object(
+                publisher, "ensure_repo", side_effect=AssertionError("fast path touched data repo")
+            ):
+                self.assertEqual(publisher.main(argv), 0)
+
     def test_publisher_telemetry_never_sends_telegram(self) -> None:
         normal_cycle = {"metrics": {"chat_id": 178, "prompt_id": "417826", "cycle_key": "normal"}}
         missing_cycles = [
