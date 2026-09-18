@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import sqlite3
 import tempfile
 from pathlib import Path
 import unittest
@@ -224,6 +225,17 @@ def argparse_like(root: Path, **kwargs: Path) -> object:
     args.source_root = str(kwargs.get("source_root", Path("/does/not/matter")))
     args.codex_dir = str(kwargs.get("codex_dir", Path("/does/not/matter")))
     return args
+
+
+    def test_archive_db_context_closes_connection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "archive"
+            archive.init_db(root)
+            con = archive.connect_db(root)
+            with con:
+                con.execute("SELECT 1")
+            with self.assertRaises(sqlite3.ProgrammingError):
+                con.execute("SELECT 1")
 
 
 if __name__ == "__main__":
