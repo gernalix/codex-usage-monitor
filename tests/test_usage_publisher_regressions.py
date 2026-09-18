@@ -70,6 +70,40 @@ class UsagePublisherRegressionTests(unittest.TestCase):
                 cycles, _events = publisher.parse_session(session, con)
             self.assertEqual(cycles[0]["metrics"]["prompt_id"], "681395")
 
+    def test_inline_prompt_id_accepts_markdown_escaped_underscore(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session = root / "session.jsonl"
+            rows = [
+                {"timestamp": "2026-09-18T16:54:51Z", "type": "session_meta", "payload": {"session_id": "s-escaped"}},
+                {"timestamp": "2026-09-18T16:54:52Z", "type": "turn_context", "payload": {"turn_id": "turn-escaped", "model": "gpt-5.6-sol", "collaboration_mode": {"settings": {"reasoning_effort": "medium"}}}},
+                {
+                    "timestamp": "2026-09-18T16:54:53Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": r"PROMPT\_ID=918274 | project\_id=49"}],
+                    },
+                },
+                {
+                    "timestamp": "2026-09-18T16:54:54Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "task_complete",
+                        "turn_id": "turn-escaped",
+                        "last_agent_message": "RESULT: PASS — PROMPT_ID 918274",
+                        "duration_ms": 1000,
+                    },
+                },
+            ]
+            write_jsonl(session, rows)
+            with publisher.connect_state(root / "state") as con:
+                cycles, _events = publisher.parse_session(session, con)
+
+            self.assertEqual(cycles[0]["metrics"]["prompt_id"], "918274")
+            self.assertIn(r"PROMPT\_ID=918274", cycles[0]["metrics"]["prompt_text_redacted"])
+
     def test_attached_prompt_is_indexed_from_codex_attachment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
