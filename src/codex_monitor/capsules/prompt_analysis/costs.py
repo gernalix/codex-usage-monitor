@@ -83,7 +83,8 @@ def prompt_id_from_user_message(top: Any, ptype: Any, payload: dict[str, Any]) -
         message = "\n".join(parts)
     if not isinstance(message, str):
         return None
-    match = PROMPT_RE.search(message)
+    normalized = message.replace(r"\\_", "_")
+    match = PROMPT_RE.search(normalized)
     return match.group(1) if match else None
 
 
