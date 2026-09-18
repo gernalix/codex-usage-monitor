@@ -25,6 +25,10 @@ from .base import subprocess
 # fingerprint-schema migration shortcut, state is not advanced before Git publish
 # succeeds, so a failed backfill remains retryable.
 PUBLICATION_SEMANTICS_VERSION = 3
+_base.SOURCE_SCAN_GENERATION = (
+    f"publication-semantics-v{PUBLICATION_SEMANTICS_VERSION}:"
+    f"fingerprint-schema-{FINGERPRINT_SCHEMA}"
+)
 _RAW_CYCLE_FINGERPRINT = _base._fingerprint
 
 
