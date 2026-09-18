@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import closing
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -260,7 +261,7 @@ class PromptEfficiencyTests(unittest.TestCase):
     def test_load_prompt_attempts_excludes_incomplete_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "task_costs.sqlite"
-            with sqlite3.connect(db) as con:
+            with closing(sqlite3.connect(db)) as con:
                 con.execute(
                     """
                     CREATE TABLE prompt_costs (

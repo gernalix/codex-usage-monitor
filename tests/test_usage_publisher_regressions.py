@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import closing
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -234,7 +235,7 @@ class UsagePublisherRegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp)
             db = state / "publisher.sqlite"
-            with sqlite3.connect(db) as con:
+            with closing(sqlite3.connect(db)) as con:
                 con.executescript(
                     """
                     CREATE TABLE session_chats (

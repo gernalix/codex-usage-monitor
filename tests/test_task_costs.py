@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import closing
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -102,7 +103,7 @@ class TaskCostTests(unittest.TestCase):
             costs.write_outputs([session], prompts, root)
 
             db = root / "index/task_costs.sqlite"
-            with sqlite3.connect(db) as con:
+            with closing(sqlite3.connect(db)) as con:
                 row = con.execute("SELECT prompt_id,completion_state,total_tokens,uncached_input_tokens FROM prompt_costs").fetchone()
             self.assertEqual(row, ("284731", "eof_incomplete", 140, 23))
             self.assertTrue((root / "index/prompt_costs.csv").exists())

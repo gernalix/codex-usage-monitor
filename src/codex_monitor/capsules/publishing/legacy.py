@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import datetime as dt
 import fcntl
 import hashlib
@@ -584,7 +585,7 @@ def quota_index(quota_db: Path) -> list[dict[str, Any]]:
     if not quota_db.exists() or not archive.sqlite_has_table(quota_db, "quota_snapshots"):
         return []
     uri = f"file:{quota_db}?mode=ro"
-    with sqlite3.connect(uri, uri=True, timeout=30) as con:
+    with closing(sqlite3.connect(uri, uri=True, timeout=30)) as con:
         con.row_factory = sqlite3.Row
         return [archive.redact_obj(dict(row)) for row in con.execute("SELECT * FROM quota_overview ORDER BY acquired_at_utc DESC LIMIT 500")]
 
