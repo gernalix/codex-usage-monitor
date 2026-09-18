@@ -36,7 +36,7 @@ from .legacy import (
 
 
 VERSION = "2026.09.16"
-FINGERPRINT_SCHEMA = 3
+FINGERPRINT_SCHEMA = 4
 SOURCE_SCAN_GENERATION = f"fingerprint-schema-{FINGERPRINT_SCHEMA}"
 GUARD_METADATA_KEYS = {"repo_project", "repo_paths", "repo_projects", "repo_write_projects", "repo_path_kinds"}
 _GOAL_PREFIX = '<codex_internal_context source="goal">'

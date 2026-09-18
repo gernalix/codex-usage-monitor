@@ -405,8 +405,14 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
         if top == "turn_context":
             collab = payload.get("collaboration_mode") if isinstance(payload.get("collaboration_mode"), dict) else {}
             settings = collab.get("settings") if isinstance(collab.get("settings"), dict) else {}
-            current = {
-                "turn_id": str(payload.get("turn_id") or f"line-{line_no}"),
+            turn_id = str(payload.get("turn_id") or f"line-{line_no}")
+            if current is not None and current["turn_id"] == turn_id:
+                current["model"] = payload.get("model") or settings.get("model") or current.get("model")
+                current["reasoning_effort"] = settings.get("reasoning_effort") or payload.get("effort") or current.get("reasoning_effort")
+                current["cwd"] = payload.get("cwd") or current.get("cwd")
+            else:
+                current = {
+                "turn_id": turn_id,
                 "root_turn_id": payload.get("root_turn_id"),
                 "started_at_utc": utc_stamp(ts) if ts else None,
                 "model": payload.get("model") or settings.get("model"),
@@ -423,7 +429,7 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
                 "token": {},
                 "quota_first": None,
                 "quota_last": None,
-            }
+                }
         event = {
             "timestamp_utc": utc_stamp(ts) if ts else None,
             "top_type": top,

@@ -78,6 +78,17 @@ class UsagePublisherTests(unittest.TestCase):
         self.assertIsNone(publisher.prompt_id_from_text("no prompt here"))
         self.assertIsNone(publisher.prompt_id_from_text("XPROMPT_ID=123456"))
 
+    def test_repeated_turn_context_keeps_markdown_escaped_prompt_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session = root / "session.jsonl"
+            rows = session_rows("019fd1da-cc5d-7db1-b880-a14be6111c38", "918274", prompt_label=r"PROMPT\_ID=")
+            rows.insert(3, {"timestamp": "2026-09-05T10:00:02.5Z", "type": "turn_context", "payload": {"turn_id": "turn-1", "model": "gpt-test", "collaboration_mode": {"settings": {"reasoning_effort": "low"}}}})
+            write_jsonl(session, rows)
+            with publisher.connect_state(root / "state") as con:
+                cycles, _events = publisher.parse_session(session, con)
+            self.assertEqual(cycles[0]["metrics"]["prompt_id"], "918274")
+
     def test_prompt_id_chat_id_multiple_finals_and_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
