@@ -28,7 +28,7 @@ DEFAULT_STATE_DIR = Path.home() / ".local/state/codex-usage-publisher"
 DEFAULT_DATA_REPO = Path.home() / "projects/codex-usage"
 DEFAULT_DATA_REMOTE = "https://github.com/gernalix/codex-usage"
 DEFAULT_QUOTA_DB = Path.home() / ".local/share/codex-usage-monitor/codex_usage_monitor.db"
-SOURCE_SNAPSHOT_SCHEMA = 1
+SOURCE_SNAPSHOT_SCHEMA = 2
 
 
 class PublisherError(RuntimeError):
@@ -188,6 +188,8 @@ def _source_snapshot(paths: list[Path]) -> list[dict[str, int | str]] | None:
                 "size": int(stat.st_size),
                 "mtime_ns": int(stat.st_mtime_ns),
                 "ctime_ns": int(stat.st_ctime_ns),
+                "inode": int(stat.st_ino),
+                "device": int(stat.st_dev),
             }
         )
     return rows
@@ -213,6 +215,97 @@ def _source_snapshot_matches(
         and payload.get("generation") == generation
         and payload.get("files") == rows
     )
+
+
+_TERMINAL_APPEND_MARKERS = (b"task_complete", b"turn_aborted")
+
+
+def _load_source_snapshot(state_dir: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(_source_snapshot_path(state_dir).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _source_snapshot_can_advance_without_rescan(
+    state_dir: Path,
+    generation: str,
+    rows: list[dict[str, int | str]],
+) -> bool:
+    """Return True when changes are append-only and cannot complete a publishable cycle.
+
+    Native Codex rollouts grow continuously while a task is running. Re-parsing every
+    historical rollout for reasoning/tool/token appends is wasted work: the publisher
+    cannot emit a new cycle until a terminal event is appended. We therefore inspect
+    only newly appended bytes and advance the snapshot when no terminal marker occurs.
+    Any replacement, truncation, in-place rewrite, generation change, or terminal
+    append falls back to the full parser.
+    """
+    payload = _load_source_snapshot(state_dir)
+    if (
+        payload is None
+        or payload.get("schema") != SOURCE_SNAPSHOT_SCHEMA
+        or payload.get("generation") != generation
+        or not isinstance(payload.get("files"), list)
+    ):
+        return False
+
+    try:
+        previous = {str(row["path"]): row for row in payload["files"] if isinstance(row, dict)}
+        current = {str(row["path"]): row for row in rows}
+    except (KeyError, TypeError):
+        return False
+
+    if set(previous) - set(current):
+        return False
+
+    saw_change = False
+    for path_text, row in current.items():
+        old = previous.get(path_text)
+        if old is None:
+            old_size = 0
+            saw_change = True
+        else:
+            try:
+                old_size = int(old["size"])
+                new_size = int(row["size"])
+                same_file = (
+                    int(old.get("inode", -1)) == int(row.get("inode", -2))
+                    and int(old.get("device", -1)) == int(row.get("device", -2))
+                )
+            except (TypeError, ValueError, KeyError):
+                return False
+            if not same_file or new_size < old_size:
+                return False
+            if new_size == old_size:
+                if old != row:
+                    return False
+                continue
+            saw_change = True
+
+        try:
+            new_size = int(row["size"])
+        except (TypeError, ValueError, KeyError):
+            return False
+        if new_size <= old_size:
+            continue
+
+        try:
+            with Path(path_text).open("rb") as handle:
+                handle.seek(old_size)
+                remaining = new_size - old_size
+                while remaining > 0:
+                    chunk = handle.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        return False
+                    remaining -= len(chunk)
+                    if any(marker in chunk for marker in _TERMINAL_APPEND_MARKERS):
+                        return False
+        except OSError:
+            return False
+
+    return saw_change
 
 
 def _write_source_snapshot(
@@ -686,28 +779,36 @@ def command_run(
         with connect_state_fn(state_dir) as con:
             source_paths = sorted(source_root.glob("**/*.jsonl"))
             source_snapshot = _source_snapshot(source_paths)
-            if (
-                source_generation
-                and source_snapshot is not None
-                and not _publisher_has_pending_state(con)
-                and _source_snapshot_matches(state_dir, source_generation, source_snapshot)
-            ):
-                counts = con.execute(
-                    "SELECT COUNT(*) cycles, SUM(prompt_id IS NOT NULL) prompt_ids FROM cycles"
-                ).fetchone()
-                chats = con.execute("SELECT COUNT(*) chats FROM session_chats").fetchone()
-                print(
-                    json.dumps(
-                        {
-                            "status": "noop_unchanged_sources",
-                            "chats": int(chats["chats"] or 0),
-                            "cycles": int(counts["cycles"] or 0),
-                            "prompt_ids": int(counts["prompt_ids"] or 0),
-                        },
-                        sort_keys=True,
+            if source_generation and source_snapshot is not None and not _publisher_has_pending_state(con):
+                exact_match = _source_snapshot_matches(
+                    state_dir, source_generation, source_snapshot
+                )
+                nonterminal_append = (
+                    not exact_match
+                    and _source_snapshot_can_advance_without_rescan(
+                        state_dir, source_generation, source_snapshot
                     )
                 )
-                return 0
+                if exact_match or nonterminal_append:
+                    if nonterminal_append:
+                        _write_source_snapshot(state_dir, source_generation, source_snapshot)
+                    counts = con.execute(
+                        "SELECT COUNT(*) cycles, SUM(prompt_id IS NOT NULL) prompt_ids FROM cycles"
+                    ).fetchone()
+                    chats = con.execute("SELECT COUNT(*) chats FROM session_chats").fetchone()
+                    print(
+                        json.dumps(
+                            {
+                                "status": "noop_unchanged_sources",
+                                "source_change": "nonterminal_append" if nonterminal_append else "none",
+                                "chats": int(chats["chats"] or 0),
+                                "cycles": int(counts["cycles"] or 0),
+                                "prompt_ids": int(counts["prompt_ids"] or 0),
+                            },
+                            sort_keys=True,
+                        )
+                    )
+                    return 0
 
             cycles: list[dict[str, Any]] = []
             chat_events: dict[int, list[dict[str, Any]]] = {}
