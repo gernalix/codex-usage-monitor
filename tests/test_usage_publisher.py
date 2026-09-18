@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 from pathlib import Path
 import unittest
@@ -668,6 +669,40 @@ class UsagePublisherTests(unittest.TestCase):
                 self.assertEqual(guard.call_count, 1)
                 self.assertEqual(publisher.main(argv), 0)
                 self.assertEqual(guard.call_count, 1)
+
+
+    def test_publisher_lock_waits_through_transient_contention(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "publisher.lock"
+            attempts = {"n": 0}
+
+            def fake_flock(_fd: int, operation: int) -> None:
+                if operation & publisher.legacy.fcntl.LOCK_UN:
+                    return
+                attempts["n"] += 1
+                if attempts["n"] == 1:
+                    raise BlockingIOError()
+
+            with mock.patch.object(publisher.legacy.fcntl, "flock", side_effect=fake_flock), \
+                 mock.patch.object(publisher.legacy.time, "monotonic", return_value=0.0), \
+                 mock.patch.object(publisher.legacy.time, "sleep") as sleep:
+                with publisher.legacy.ExclusiveLock(path, wait_seconds=1.0, poll_seconds=0.01):
+                    pass
+
+            self.assertEqual(attempts["n"], 2)
+            sleep.assert_called_once()
+
+    def test_publisher_run_defaults_to_bounded_lock_wait(self) -> None:
+        args = publisher.legacy.build_parser().parse_args(["run"])
+        self.assertEqual(args.wait_lock_seconds, 30.0)
+
+    def test_publisher_state_context_closes_connection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            con = publisher.connect_state(Path(tmp) / "state")
+            with con:
+                con.execute("SELECT 1")
+            with self.assertRaises(sqlite3.ProgrammingError):
+                con.execute("SELECT 1")
 
 
 if __name__ == "__main__":
