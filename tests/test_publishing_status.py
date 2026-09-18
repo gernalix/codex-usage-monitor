@@ -29,25 +29,13 @@ class PublishingStatusTests(unittest.TestCase):
         self.assertEqual("FAIL", api.status_from_final("VERIFICATION=FAIL"))
         self.assertEqual("BLOCKED", api.status_from_final("ESITO: BLOCKED"))
 
-    def test_structured_report_can_prove_pass(self) -> None:
+    def test_component_passes_do_not_imply_global_pass(self) -> None:
         report = (
             "- Test: PASS, 12/12.\n"
             "- Comando reale: PASS, exit code 0.\n"
             "- Problemi residui: nessuno.\n"
         )
-        self.assertEqual("PASS", api.status_from_final(report))
-
-    def test_structured_report_without_clear_completion_stays_unknown(self) -> None:
-        self.assertEqual(
-            "UNKNOWN",
-            api.status_from_final("- Test: PASS\n- Comando reale: PASS"),
-        )
-        self.assertEqual(
-            "UNKNOWN",
-            api.status_from_final(
-                "- Test: PASS\n- Comando reale: FAIL\n- Problemi residui: nessuno"
-            ),
-        )
+        self.assertEqual("UNKNOWN", api.status_from_final(report))
 
     def test_public_api_patches_base_parser_used_by_runtime(self) -> None:
         self.assertIs(base.status_from_final, api.status_from_final)
