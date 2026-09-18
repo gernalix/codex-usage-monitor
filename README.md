@@ -127,6 +127,8 @@ Captured fields include model, reasoning effort, active duration, tool calls, re
 
 The publisher is a Fedora-local process because it consumes native Codex rollouts and local repository state.
 
+Publisher invocations share one filesystem lock. `run` now waits up to 30 seconds by default for a concurrent timer/manual invocation to finish instead of immediately returning `status=locked`; use `run --wait-lock-seconds 0` only when an immediate non-waiting probe is explicitly desired. This keeps runtime validation from failing just because the periodic timer happened to start at the same moment.
+
 ## Complete redacted chat dumps
 
 `codex_chat_dump_publisher.py` incrementally mirrors native Codex rollout records to the private `gernalix/codex-usage` repository for remote inspection without manual copy/paste.
