@@ -127,6 +127,8 @@ Captured fields include model, reasoning effort, active duration, tool calls, re
 
 The publisher is a Fedora-local process because it consumes native Codex rollouts and local repository state.
 
+Publisher telemetry is **passive by default**. Missing `PROMPT_ID` cycles are still preserved under the unassigned usage data and can be diagnosed later, but they do not generate Telegram alerts. Telegram remains reserved for actionable quota/runtime signals handled by the dedicated monitor rather than routine publication metadata.
+
 Publisher invocations share one filesystem lock. `run` now waits up to 30 seconds by default for a concurrent timer/manual invocation to finish instead of immediately returning `status=locked`; use `run --wait-lock-seconds 0` only when an immediate non-waiting probe is explicitly desired. This keeps runtime validation from failing just because the periodic timer happened to start at the same moment.
 
 ## Complete redacted chat dumps
