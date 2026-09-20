@@ -22,6 +22,9 @@ ROUNDTRIP_HEAVY_TOOL_CALL_THRESHOLD = 30
 HIGH_TOOL_CALL_RATE_THRESHOLD = 8.0
 LARGE_TOOL_OUTPUT_TOKEN_THRESHOLD = 3_000
 VERBOSE_SUCCESS_OUTPUT_TOKEN_THRESHOLD = 2_000
+EXPLICIT_WAIT_SECONDS_THRESHOLD = 60.0
+EXPLICIT_WAIT_SHARE_THRESHOLD = 0.10
+WAIT_TOOL_NAMES = {"sleep"}
 DEFAULT_COST_DB = Path.home() / ".local/share/codex-session-archive/index/task_costs.sqlite"
 ADB_INSTALL_RE = re.compile(r"\badb\s+(?P<before_install>[^;&|\n]*?)\binstall\b", re.I)
 TOOL_OUTPUT_TOKEN_RE = re.compile(r"\boriginal token count:\s*(\d+)\b", re.I)
@@ -54,6 +57,40 @@ def _json_obj(value: Any) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _tool_input_obj(event: dict[str, Any]) -> dict[str, Any]:
+    raw = event.get("tool_input_text")
+    if not isinstance(raw, (str, dict)):
+        raw = event.get("content_text")
+    return _json_obj(raw)
+
+
+def _explicit_wait_seconds(event: dict[str, Any]) -> float:
+    if event.get("subtype") not in {"function_call", "custom_tool_call"}:
+        return 0.0
+    if str(event.get("tool_name") or "") not in WAIT_TOOL_NAMES:
+        return 0.0
+    args = _tool_input_obj(event)
+    try:
+        if args.get("duration_ms") is not None:
+            return max(0.0, float(args["duration_ms"]) / 1000.0)
+        if args.get("duration_seconds") is not None:
+            return max(0.0, float(args["duration_seconds"]))
+        if args.get("seconds") is not None:
+            return max(0.0, float(args["seconds"]))
+    except (TypeError, ValueError):
+        return 0.0
+    return 0.0
+
+
+def _observed_tool_calls_by_type(events: list[dict[str, Any]]) -> dict[str, int]:
+    counter = Counter(
+        str(event.get("tool_name") or "unknown")
+        for event in events
+        if event.get("subtype") in {"function_call", "custom_tool_call"}
+    )
+    return dict(sorted(counter.items()))
 
 
 def load_jsonl(path: Path | None) -> list[dict[str, Any]]:
@@ -242,6 +279,12 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
     large_tool_outputs = [count for count in tool_output_counts if count >= LARGE_TOOL_OUTPUT_TOKEN_THRESHOLD]
     truncated_tool_outputs = sum(_truncated_tool_output(event) for event in events)
     verbose_gradle_success_outputs = sum(_verbose_gradle_success_output(event) for event in events)
+    explicit_waits = [
+        seconds for event in events
+        if (seconds := _explicit_wait_seconds(event)) > 0
+    ]
+    explicit_wait_seconds = sum(explicit_waits)
+    observed_tool_calls_by_type = _observed_tool_calls_by_type(events)
 
     repeated = [
         {"command": command, "count": count}
@@ -301,6 +344,7 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
     cache_ratio = (cached / input_tokens) if input_tokens else None
     uncached_share = (uncached / input_tokens) if input_tokens else None
     tool_calls_per_minute = (tool_calls * 60.0 / duration) if duration > 0 else None
+    explicit_wait_share = (explicit_wait_seconds / duration) if duration > 0 else None
     stored_status = str(metrics.get("status") or "").upper() or None
     reported_status = _reported_status(metrics)
 
@@ -318,6 +362,27 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
                 "uncached_input_tokens": uncached,
             }
         )
+    if explicit_wait_seconds >= EXPLICIT_WAIT_SECONDS_THRESHOLD:
+        findings.append(
+            {
+                "code": "explicit_wait_time",
+                "calls": len(explicit_waits),
+                "seconds": round(explicit_wait_seconds, 3),
+            }
+        )
+    if (
+        len(explicit_waits) >= 2
+        and explicit_wait_share is not None
+        and explicit_wait_share >= EXPLICIT_WAIT_SHARE_THRESHOLD
+    ):
+        findings.append(
+            {
+                "code": "wait_heavy_session",
+                "calls": len(explicit_waits),
+                "seconds": round(explicit_wait_seconds, 3),
+                "share": round(explicit_wait_share, 4),
+            }
+        )
     if stored_status and reported_status and stored_status != reported_status:
         findings.append(
             {
@@ -328,8 +393,8 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
         )
 
     tool_calls_by_type = metrics.get("tool_calls_by_type")
-    if not isinstance(tool_calls_by_type, dict):
-        tool_calls_by_type = {}
+    if not isinstance(tool_calls_by_type, dict) or not tool_calls_by_type:
+        tool_calls_by_type = observed_tool_calls_by_type
 
     return {
         "prompt_id": metrics.get("prompt_id"),
@@ -345,6 +410,9 @@ def analyze(metrics: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, 
         "tool_call_count": tool_calls,
         "tool_calls_by_type": tool_calls_by_type,
         "tool_calls_per_minute": tool_calls_per_minute,
+        "explicit_wait_call_count": len(explicit_waits),
+        "explicit_wait_seconds": explicit_wait_seconds,
+        "explicit_wait_share": explicit_wait_share,
         "repo_path_count": len(repo_paths),
         "unique_repo_path_count": len(unique_repo_paths),
         "memory_read_count": memory_reads,
