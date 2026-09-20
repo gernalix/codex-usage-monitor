@@ -12,6 +12,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from codex_monitor.credentials import credential_path
 import re
 import secrets
 import shutil
@@ -169,8 +170,9 @@ def getenv_int(name: str, default: int, minimum: int | None = None) -> int:
 
 
 def build_config(args: argparse.Namespace | None = None) -> Config:
-    env_file = Path(os.getenv("CODEX_USAGE_ENV_FILE", "/home/ubuntu/.config/codex-usage-monitor/codex-usage-monitor.env"))
-    load_env_file(env_file.expanduser())
+    legacy_env = Path(os.getenv("CODEX_USAGE_ENV_FILE", "/home/ubuntu/.config/codex-usage-monitor/codex-usage-monitor.env"))
+    env_file = credential_path("codex-usage-monitor.env", legacy_env)
+    load_env_file(env_file)
     db_path = Path(os.getenv("CODEX_USAGE_DB", str(DEFAULT_DB))).expanduser()
     state_dir = Path(os.getenv("CODEX_USAGE_STATE_DIR", str(DEFAULT_STATE_DIR))).expanduser()
     return Config(
@@ -1424,7 +1426,11 @@ def load_telegram_helper(path: Path) -> ModuleType:
 def send_telegram(cfg: Config, title: str, message: str) -> str:
     if not cfg.telegram_helper.exists():
         env = os.environ.copy()
-        env.setdefault("TELEGRAM_NOTIFY_CONFIG", str(Path.home() / ".config/codex/secrets/telegram.env"))
+        telegram_config = credential_path(
+            "telegram.env",
+            Path.home() / ".config/codex/secrets/telegram.env",
+        )
+        env.setdefault("TELEGRAM_NOTIFY_CONFIG", str(telegram_config))
         env["TELEGRAM_PROJECT_ID"] = "8"
         result = subprocess.run(
             [sys.executable, "-m", "telegram_notify", title, message],
