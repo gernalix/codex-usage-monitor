@@ -83,6 +83,50 @@ class PromptEfficiencyTests(unittest.TestCase):
         self.assertIn("trace_processor_discovery_churn", codes)
         self.assertNotIn("high_uncached_input_tokens", codes)
 
+    def test_404936_shape_flags_explicit_wait_and_roundtrip_churn(self) -> None:
+        metrics = {
+            "prompt_id": "404936",
+            "total_tokens": 125635,
+            "input_tokens": 125193,
+            "cached_input_tokens": 124544,
+            "uncached_input_tokens": 649,
+            "output_tokens": 442,
+            "reasoning_output_tokens": 149,
+            "tool_call_count": 86,
+            "duration_seconds": 1197.864,
+            "repo_paths": ["/home/daniele/projects/github-autosync"],
+        }
+        events = [
+            *[
+                {
+                    "subtype": "custom_tool_call",
+                    "tool_name": "exec",
+                    "content_text": "",
+                }
+                for _ in range(83)
+            ],
+            *[
+                {
+                    "subtype": "function_call",
+                    "tool_name": "sleep",
+                    "content_text": json.dumps({"duration_ms": 50000}),
+                }
+                for _ in range(3)
+            ],
+        ]
+
+        result = efficiency.analyze(metrics, events)
+        codes = {item["code"] for item in result["findings"]}
+
+        self.assertEqual({"exec": 83, "sleep": 3}, result["tool_calls_by_type"])
+        self.assertEqual(3, result["explicit_wait_call_count"])
+        self.assertEqual(150.0, result["explicit_wait_seconds"])
+        self.assertAlmostEqual(150.0 / 1197.864, result["explicit_wait_share"])
+        self.assertIn("high_tool_call_count", codes)
+        self.assertIn("roundtrip_heavy_cached_session", codes)
+        self.assertIn("explicit_wait_time", codes)
+        self.assertIn("wait_heavy_session", codes)
+
     def test_827614_shape_flags_roundtrip_and_avoidable_meta_reads(self) -> None:
         metrics = {
             "prompt_id": "827614",
