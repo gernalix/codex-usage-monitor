@@ -9,9 +9,8 @@ WorkingDirectory=/home/daniele/projects/codex-usage-monitor
 Environment=PYTHONUNBUFFERED=1
 Environment=CODEX_USAGE_DB=/home/daniele/.local/share/codex-usage-monitor/codex_usage_monitor.db
 Environment=CODEX_USAGE_STATE_DIR=/home/daniele/.local/state/codex-usage-monitor
-Environment=CODEX_USAGE_ENV_FILE=/home/daniele/.config/codex-usage-monitor/codex-usage-monitor.env
-Environment=TELEGRAM_NOTIFY_CONFIG=/home/daniele/.config/codex/secrets/telegram.env
-EnvironmentFile=-/home/daniele/.config/codex-usage-monitor/codex-usage-monitor.env
+LoadCredential=codex-usage-monitor.env:/home/daniele/.config/codex-usage-monitor/codex-usage-monitor.env
+LoadCredential=telegram.env:/home/daniele/.config/codex/secrets/telegram.env
 ExecStart=/usr/bin/python3 /home/daniele/projects/codex-usage-monitor/codex_usage_monitor.py once
 # Push heartbeats run only after a successful acquisition. Delivery is best-effort:
 # a Kuma outage must not turn a successful quota collection into a failed systemd unit.
