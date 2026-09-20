@@ -38,6 +38,12 @@ Native Codex sessions:
 - `codex-session-archive.timer` → passive local archive/index updates.
 - `codex-usage-publisher.timer` → usage/prompt/chat publication and complete redacted native chat dumps.
 
+The quota-monitor service receives `codex-usage-monitor.env` and the shared
+`telegram.env` through systemd `LoadCredential=`. Runtime code resolves those
+files from `$CREDENTIALS_DIRECTORY` first. Existing mode-`0600` files remain
+migration sources/fallbacks so a later host-local switch to
+`LoadCredentialEncrypted=` does not require another application-code change.
+
 There must be no equivalent active `codex-usage-monitor` service/timer on the Oracle VM after the Fedora cutover is validated.
 
 ## Quota monitor

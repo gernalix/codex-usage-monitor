@@ -8,6 +8,9 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
+
+from codex_monitor.credentials import credential_path
 
 
 DEFAULT_ENV = "CODEX_USAGE_KUMA_PUSH_URL"
@@ -67,6 +70,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     url = os.getenv(args.env, "").strip()
+    if not url:
+        legacy_env = Path(os.getenv("CODEX_USAGE_ENV_FILE", str(Path.home() / ".config/codex-usage-monitor/codex-usage-monitor.env")))
+        env_file = credential_path("codex-usage-monitor.env", legacy_env)
+        if env_file.is_file():
+            for raw in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                if key.strip() == args.env:
+                    url = value.strip().strip('"').strip("'")
+                    break
     if not url:
         if args.strict:
             print(f"{args.env} is not configured", file=sys.stderr)
