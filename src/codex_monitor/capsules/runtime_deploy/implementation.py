@@ -14,7 +14,6 @@ DEFAULT_RUNTIME_ROOT = Path.home() / ".local/lib/codex-usage-monitor"
 DEFAULT_FETCH_TIMEOUT_SECONDS = 30
 RUNTIME_FILES = (
     "codex_usage_monitor.py",
-    "uptime_kuma_push.py",
     "codex_session_archive.py",
     "codex_session_archive_incremental.py",
     "codex_task_costs.py",

@@ -68,7 +68,7 @@ SQLite views include:
 - `reset_count_changes`
 - `recent_failures`
 
-A successful Fedora acquisition can also send a best-effort Uptime Kuma Push heartbeat. Kuma may live on the Oracle VM; the collector itself remains local on Fedora. See `UPTIME_KUMA.md`.
+Fedora System Monitor owns the Uptime Kuma heartbeat for acquisition success and freshness. The collector remains local on Fedora.
 
 ## Fedora native Codex session archive
 

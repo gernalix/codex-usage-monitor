@@ -12,9 +12,6 @@ Environment=CODEX_USAGE_STATE_DIR=/home/daniele/.local/state/codex-usage-monitor
 LoadCredential=codex-usage-monitor.env:/home/daniele/.config/codex-usage-monitor/codex-usage-monitor.env
 LoadCredential=telegram.env:/home/daniele/.config/codex/secrets/telegram.env
 ExecStart=/usr/bin/python3 /home/daniele/projects/codex-usage-monitor/codex_usage_monitor.py once
-# Push heartbeats run only after a successful acquisition. Delivery is best-effort:
-# a Kuma outage must not turn a successful quota collection into a failed systemd unit.
-ExecStartPost=/usr/bin/python3 /home/daniele/projects/codex-usage-monitor/uptime_kuma_push.py --message "codex-usage-monitor cycle ok"
 TimeoutStartSec=180
 NoNewPrivileges=true
 PrivateTmp=true
