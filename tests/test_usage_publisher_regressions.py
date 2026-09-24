@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 from codex_monitor.capsules.publishing import base as publisher
+from codex_monitor.capsules.publishing import implementation as publisher_impl
 
 
 def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
@@ -62,6 +63,95 @@ def goal_continuation() -> list[dict[str, object]]:
 
 
 class UsagePublisherRegressionTests(unittest.TestCase):
+    def test_goal_continuation_prefers_authoritative_roadmap_start_prompt_id(self) -> None:
+        prompt = """<codex_internal_context source="goal">
+Continue working toward the active thread goal.
+
+Budget:
+- Tokens used: 0
+</codex_internal_context>"""
+        cycles = [
+            {
+                "metrics": {
+                    "cycle_key": "cycle-new-goal",
+                    "prompt_id": "624831",
+                    "prompt_text_redacted": prompt,
+                    "final_response_redacted": "work continues",
+                    "total_tokens": 10,
+                },
+                "events": [
+                    {
+                        "subtype": "custom_tool_call_output",
+                        "content_text": (
+                            'Script completed\nOutput:\n'
+                            '{"prompt_id":"613102","roadmap_status":"running",'
+                            '"status":"ok","task_branch":"task/613102"}'
+                        ),
+                    }
+                ],
+            },
+            {
+                "metrics": {
+                    "cycle_key": "cycle-goal-followup",
+                    "prompt_id": "624831",
+                    "prompt_text_redacted": prompt.replace("Tokens used: 0", "Tokens used: 100"),
+                    "final_response_redacted": "still working",
+                    "total_tokens": 20,
+                },
+                "events": [],
+            },
+        ]
+        original = publisher_impl._BASE_PARSE_SESSION
+        publisher_impl._BASE_PARSE_SESSION = lambda *_args, **_kwargs: (cycles, [])
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                with publisher.connect_state(Path(tmp) / "state") as con:
+                    parsed, _events = publisher_impl.parse_session(Path(tmp) / "session.jsonl", con)
+        finally:
+            publisher_impl._BASE_PARSE_SESSION = original
+
+        self.assertEqual(
+            ["613102", "613102"],
+            [cycle["metrics"]["prompt_id"] for cycle in parsed],
+        )
+        self.assertEqual(
+            ["roadmap_start_output", "active_goal_continuation"],
+            [cycle["metrics"]["prompt_id_source"] for cycle in parsed],
+        )
+
+    def test_reassigned_cycle_directory_is_removed_before_republish(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            old = repo / "prompts/624831/cycles/cycle-a"
+            old.mkdir(parents=True)
+            (old / "metrics.json").write_text("{}", encoding="utf-8")
+            (repo / "index").mkdir()
+            (repo / "index/prompts.jsonl").write_text(
+                json.dumps(
+                    {
+                        "prompt_id": "624831",
+                        "cycle_key": "cycle-a",
+                        "path": "prompts/624831/cycles/cycle-a",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            removed = publisher_impl._remove_reassigned_cycle_dirs(
+                repo,
+                [
+                    {
+                        "metrics": {
+                            "cycle_key": "cycle-a",
+                            "prompt_id": "613102",
+                        },
+                        "events": [],
+                    }
+                ],
+            )
+            self.assertEqual(1, removed)
+            self.assertFalse(old.exists())
+
     def test_final_response_prompt_id_fallback_accepts_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
