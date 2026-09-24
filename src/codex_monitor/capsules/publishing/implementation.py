@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
 from pathlib import Path
 import sqlite3
 from typing import Any
@@ -48,7 +50,7 @@ from .base import (
 )
 
 
-VERSION = "2026.09.16.5"
+VERSION = "2026.09.24.1"
 _ORIGINAL_LEGACY_PARSE_SESSION = _base._legacy_parse_session
 _BASE_PARSE_SESSION = _base.parse_session
 _BASE_EXPORT_REPO = _base.export_repo
@@ -63,6 +65,38 @@ def _goal_completion(text: str) -> dict[str, Any] | None:
     if not isinstance(goal, dict) or str(goal.get("status") or "").lower() != "complete":
         return None
     return goal
+
+
+_ROADMAP_START_PROMPT_RE = re.compile(r'"prompt_id"\s*:\s*"(\d{6})"')
+_ROADMAP_START_RUNNING_RE = re.compile(r'"roadmap_status"\s*:\s*"running"')
+_ROADMAP_START_BRANCH_RE = re.compile(r'"task_branch"\s*:\s*"task/(\d{6})"')
+
+
+def _roadmap_started_prompt_id(events: list[dict[str, Any]]) -> str | None:
+    """Return the prompt explicitly claimed by roadmap_start in this cycle.
+
+    Goal continuations may inherit the previous prompt id before they read or
+    register a new goal. A successful roadmap_start output is stronger evidence
+    than that inherited identity.
+    """
+    for event in events:
+        if str(event.get("subtype") or "") not in {
+            "function_call_output",
+            "custom_tool_call_output",
+        }:
+            continue
+        text = str(event.get("content_text") or "")
+        if not _ROADMAP_START_RUNNING_RE.search(text):
+            continue
+        prompt = _ROADMAP_START_PROMPT_RE.search(text)
+        branch = _ROADMAP_START_BRANCH_RE.search(text)
+        if not prompt:
+            continue
+        prompt_id = prompt.group(1)
+        if branch and branch.group(1) != prompt_id:
+            continue
+        return prompt_id
+    return None
 
 
 def _recover_completed_goal_aborts(
@@ -232,6 +266,7 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
     )
     last_prompt_id: str | None = None
     last_status: str | None = None
+    active_goal_prompt_id: str | None = None
     changed = False
 
     for cycle in cycles:
@@ -251,6 +286,25 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
         inherited_blocked_followup = bool(
             last_prompt_id and last_status == "BLOCKED" and _base._is_blocked_followup(prompt_text)
         )
+
+        if is_goal_prompt:
+            started_prompt_id = _roadmap_started_prompt_id(cycle.get("events") or [])
+            if started_prompt_id:
+                metrics["prompt_id"] = started_prompt_id
+                metrics["prompt_id_source"] = "roadmap_start_output"
+                prompt_id = started_prompt_id
+                active_goal_prompt_id = started_prompt_id
+            elif active_goal_prompt_id:
+                metrics["prompt_id"] = active_goal_prompt_id
+                metrics["prompt_id_source"] = "active_goal_continuation"
+                prompt_id = active_goal_prompt_id
+            elif "Tokens used: 0" in prompt_text and not prompt_id_from_user:
+                # A fresh goal has started but has not yet produced an
+                # authoritative prompt claim. Do not inherit the prior goal.
+                metrics["prompt_id"] = None
+                prompt_id = None
+        else:
+            active_goal_prompt_id = None
 
         if (
             prompt_id
@@ -309,6 +363,38 @@ def _stable_layout_missing(repo: Path, cycles: list[dict[str, Any]]) -> bool:
     )
 
 
+def _remove_reassigned_cycle_dirs(repo: Path, cycles: list[dict[str, Any]]) -> int:
+    index_path = repo / "index/prompts.jsonl"
+    if not index_path.is_file():
+        return 0
+    previous: dict[str, str] = {}
+    for line in index_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict) and row.get("cycle_key") and row.get("path"):
+            previous[str(row["cycle_key"])] = str(row["path"])
+
+    removed = 0
+    for cycle in cycles:
+        metrics = cycle["metrics"]
+        key = str(metrics["cycle_key"])
+        old_rel = previous.get(key)
+        new_rel = _stable_prompt_dir(metrics).as_posix()
+        if not old_rel or old_rel == new_rel:
+            continue
+        old_path = repo / old_rel
+        if (
+            old_path.is_dir()
+            and old_rel.startswith("prompts/")
+            and "/cycles/" in old_rel
+        ):
+            shutil.rmtree(old_path)
+            removed += 1
+    return removed
+
+
 def export_repo(
     repo: Path,
     cycles: list[dict[str, Any]],
@@ -322,7 +408,8 @@ def export_repo(
     at immutable `cycles/<cycle_key>` paths. A missing stable layout forces a
     one-time backfill even when no source cycle changed in this publisher run.
     """
-    migration_needed = _stable_layout_missing(repo, cycles)
+    reassigned_removed = _remove_reassigned_cycle_dirs(repo, cycles)
+    migration_needed = _stable_layout_missing(repo, cycles) or bool(reassigned_removed)
     _BASE_EXPORT_REPO(repo, cycles, chat_events_by_id, quota_db)
     if not _base.export_required() and not migration_needed:
         return
