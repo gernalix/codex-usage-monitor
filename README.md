@@ -129,6 +129,8 @@ Captured fields include model, reasoning effort, active duration, tool calls, re
 
 ## Usage publisher
 
+`codex-usage-monitor` is observational only with respect to `codex-roadmap`: it publishes sessions, costs, outcomes and anomalies, but it never starts or terminalizes roadmap prompts. A terminal event without the canonical roadmap finalizer is evidence to investigate, not permission to mutate lifecycle state.
+
 `codex_usage_publisher.py` publishes redacted per-prompt and per-chat usage artifacts to the private `gernalix/codex-usage` repository. It also contains the completion guard used to detect local repositories that were modified but not clean/synchronized when a Codex task finished.
 
 The publisher is a Fedora-local process because it consumes native Codex rollouts and local repository state.
