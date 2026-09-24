@@ -23,6 +23,10 @@ class _ClosingConnection(sqlite3.Connection):
 DEFAULT_SOURCE_ROOT = Path.home() / ".codex/sessions"
 DEFAULT_ARCHIVE_ROOT = Path.home() / ".local/share/codex-session-archive"
 PROMPT_RE = re.compile(r"\bPROMPT_ID\s*[:=]\s*([A-Za-z0-9_.-]+)\b")
+ROADMAP_START_PROMPT_RE = re.compile(r'"prompt_id"\s*:\s*"(\d{6})"')
+ROADMAP_START_RUNNING_RE = re.compile(r'"roadmap_status"\s*:\s*"running"')
+ROADMAP_START_BRANCH_RE = re.compile(r'"task_branch"\s*:\s*"task/(\d{6})"')
+GOAL_CONTEXT_MARKER = '<codex_internal_context source="goal">'
 USAGE_FIELDS = (
     "input_tokens",
     "cached_input_tokens",
@@ -75,7 +79,7 @@ def usage_delta(end: dict[str, int], start: dict[str, int]) -> dict[str, int]:
     return {key: max(0, intv(end.get(key)) - intv(start.get(key))) for key in USAGE_FIELDS}
 
 
-def prompt_id_from_user_message(top: Any, ptype: Any, payload: dict[str, Any]) -> str | None:
+def user_message_text(top: Any, ptype: Any, payload: dict[str, Any]) -> str | None:
     message = None
     if top == "event_msg" and ptype == "user_message":
         message = payload.get("message")
@@ -91,11 +95,39 @@ def prompt_id_from_user_message(top: Any, ptype: Any, payload: dict[str, Any]) -
                 ):
                     parts.append(item["text"])
         message = "\n".join(parts)
-    if not isinstance(message, str):
+    return message if isinstance(message, str) else None
+
+
+def prompt_id_from_user_message(top: Any, ptype: Any, payload: dict[str, Any]) -> str | None:
+    message = user_message_text(top, ptype, payload)
+    if message is None:
         return None
     normalized = message.replace(r"\_", "_")
     match = PROMPT_RE.search(normalized)
     return match.group(1) if match else None
+
+
+def is_goal_continuation_user_message(top: Any, ptype: Any, payload: dict[str, Any]) -> bool:
+    message = user_message_text(top, ptype, payload)
+    return isinstance(message, str) and GOAL_CONTEXT_MARKER in message
+
+
+def roadmap_started_prompt_id(top: Any, ptype: Any, payload: dict[str, Any]) -> str | None:
+    if top != "response_item" or ptype not in {"function_call_output", "custom_tool_call_output"}:
+        return None
+    text = payload.get("output")
+    if not isinstance(text, str):
+        text = payload.get("content")
+    if not isinstance(text, str) or not ROADMAP_START_RUNNING_RE.search(text):
+        return None
+    prompt = ROADMAP_START_PROMPT_RE.search(text)
+    branch = ROADMAP_START_BRANCH_RE.search(text)
+    if not prompt:
+        return None
+    prompt_id = prompt.group(1)
+    if branch and branch.group(1) != prompt_id:
+        return None
+    return prompt_id
 
 
 def primary_quota(payload: dict[str, Any]) -> tuple[float | None, int | None]:
@@ -166,6 +198,7 @@ def analyze_with_prompts(path: Path) -> tuple[dict[str, Any], list[dict[str, Any
     first_quota = last_quota = None
     reset_at = None
     active: dict[str, Any] | None = None
+    active_goal_prompt_id: str | None = None
     prompt_rows: list[dict[str, Any]] = []
     prompt_seq = 0
 
@@ -203,19 +236,22 @@ def analyze_with_prompts(path: Path) -> tuple[dict[str, Any], list[dict[str, Any
                     active["cwd"] = cwd or active.get("cwd")
 
             prompt_id = prompt_id_from_user_message(top, ptype, payload)
-            if prompt_id is not None:
+            is_goal_continuation = is_goal_continuation_user_message(top, ptype, payload)
+            if prompt_id is not None or is_goal_continuation:
                 # Fallback for older rollouts that start a new prompt without an
                 # exposed task_complete for the previous one.
                 if active is not None:
                     active["completion_state"] = "next_prompt_fallback"
-                    prompt_rows.append(finalize_prompt(active, session_id, str(path)))
+                    if active.get("prompt_id"):
+                        prompt_rows.append(finalize_prompt(active, session_id, str(path)))
                 prompt_seq += 1
-                if prompt_id not in prompt_id_seen:
-                    prompt_ids.append(prompt_id)
-                    prompt_id_seen.add(prompt_id)
+                effective_prompt_id = prompt_id or active_goal_prompt_id
+                if effective_prompt_id and effective_prompt_id not in prompt_id_seen:
+                    prompt_ids.append(effective_prompt_id)
+                    prompt_id_seen.add(effective_prompt_id)
                 active = {
                     "prompt_seq": prompt_seq,
-                    "prompt_id": prompt_id,
+                    "prompt_id": effective_prompt_id,
                     "completion_state": "eof_incomplete",
                     "start_ts": ts,
                     "last_ts": ts,
@@ -229,7 +265,20 @@ def analyze_with_prompts(path: Path) -> tuple[dict[str, Any], list[dict[str, Any
                     "first_quota": last_quota,
                     "last_quota": last_quota,
                     "quota_resets_at": reset_at,
+                    "is_goal_continuation": is_goal_continuation,
                 }
+                if prompt_id is not None and is_goal_continuation:
+                    active_goal_prompt_id = prompt_id
+                continue
+
+            started_prompt_id = roadmap_started_prompt_id(top, ptype, payload)
+            if started_prompt_id is not None:
+                active_goal_prompt_id = started_prompt_id
+                if started_prompt_id not in prompt_id_seen:
+                    prompt_ids.append(started_prompt_id)
+                    prompt_id_seen.add(started_prompt_id)
+                if active is not None:
+                    active["prompt_id"] = started_prompt_id
                 continue
 
             if active is not None and ts:
