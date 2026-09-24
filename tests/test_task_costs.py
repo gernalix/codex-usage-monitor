@@ -194,5 +194,45 @@ class TaskCostTests(unittest.TestCase):
         self.assertEqual(selected_with_partial[0]["source_path"], "c")
 
 
+    def test_goal_continuation_uses_authoritative_roadmap_start_prompt_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout.jsonl"
+            rows: list[dict[str, object]] = [
+                {"timestamp": "2026-09-22T18:00:00Z", "type": "session_meta", "payload": {"session_id": "goal-session"}},
+                {"timestamp": "2026-09-22T18:00:01Z", "type": "event_msg", "payload": {"type": "user_message", "message": "PROMPT_ID=624831 legacy goal"}},
+                token_event("2026-09-22T18:00:02Z", input_tokens=100, cached=80, output=10, reasoning=2, total=110, quota=1.0),
+                {
+                    "timestamp": "2026-09-22T18:00:03Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "custom_tool_call_output",
+                        "output": '{"prompt_id":"613102","roadmap_status":"running","status":"ok","task_branch":"task/613102"}',
+                    },
+                },
+                token_event("2026-09-22T18:00:04Z", input_tokens=180, cached=140, output=30, reasoning=5, total=210, quota=1.2),
+                {"timestamp": "2026-09-22T18:00:05Z", "type": "event_msg", "payload": {"type": "task_complete"}},
+                {
+                    "timestamp": "2026-09-22T18:01:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": '<codex_internal_context source="goal">\nContinue working toward the active thread goal.\n</codex_internal_context>'}],
+                    },
+                },
+                token_event("2026-09-22T18:01:01Z", input_tokens=260, cached=200, output=50, reasoning=8, total=310, quota=1.4),
+                {"timestamp": "2026-09-22T18:01:02Z", "type": "event_msg", "payload": {"type": "task_complete"}},
+            ]
+            write_jsonl(path, rows)
+
+            _session, prompts = costs.analyze_with_prompts(path)
+
+            self.assertEqual([row["prompt_id"] for row in prompts], ["613102", "613102"])
+            self.assertEqual([row["completion_state"] for row in prompts], ["task_complete", "task_complete"])
+            self.assertEqual(sum(row["total_tokens"] for row in prompts), 310)
+            self.assertEqual(costs.select_prompt_rows(prompts, "624831", include_incomplete=True), [])
+
+
+
 if __name__ == "__main__":
     unittest.main()
