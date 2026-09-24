@@ -38,6 +38,8 @@ On Fedora, `codex-usage-publisher.service` runs the normal usage publisher first
 
 No duplicate publisher service/timer should remain active on Oracle after the Fedora cutover is verified.
 
+The private `gernalix/codex-usage` checkout is a service-owned data repository: its canonical branch is written directly by `codex-usage-publisher` / `codex_chat_dump_publisher.py`. The generic `github-autosync` single-writer guard must therefore remain removed for this repository; routing minute-by-minute telemetry through task branches/PR integration would break the live publication contract.
+
 ## Manual verification
 
 Run on Fedora:
