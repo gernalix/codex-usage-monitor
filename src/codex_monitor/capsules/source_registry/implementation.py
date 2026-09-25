@@ -98,3 +98,87 @@ SOURCE_REGISTRY = (
         "excluded", "explicit_task_only",
         False, True, "Private message archives must not enter C2 by default.",
     ),
+    SourceSpec(
+        "telegram_history", "telegram-notification-history", "personal_messages",
+        _home("~/projects/telegram-notification-history"),
+        "excluded", "explicit_task_only",
+        False, True, "Telegram archives are task-scoped personal content, not orchestration context.",
+    ),
+    SourceSpec(
+        "discord_exporter", "discord-exporter", "personal_messages",
+        _home("~/projects/discord-exporter"),
+        "excluded", "explicit_task_only",
+        False, True, "Discord archives are excluded from automatic C2 ingestion.",
+    ),
+    SourceSpec(
+        "grindr_exporter", "grindr-web-exporter", "personal_messages",
+        _home("~/projects/grindr-web-exporter"),
+        "excluded", "explicit_task_only",
+        False, True, "Grindr archives are excluded from automatic C2 ingestion.",
+    ),
+)
+
+
+def source_specs(*, default_only: bool = False) -> list[SourceSpec]:
+    items = SOURCE_REGISTRY
+    if default_only:
+        items = tuple(item for item in items if item.default_enabled)
+    return list(items)
+def _status(spec: SourceSpec) -> dict[str, Any]:
+    path = Path(spec.path)
+    payload = asdict(spec)
+    payload["exists"] = path.exists()
+    payload["kind"] = "directory" if path.is_dir() else "file" if path.is_file() else "missing"
+    try:
+        stat = path.stat()
+    except OSError:
+        payload["age_seconds"] = None
+    else:
+        payload["age_seconds"] = max(0.0, time.time() - stat.st_mtime)
+    return payload
+
+
+def registry_status(*, default_only: bool = False) -> list[dict[str, Any]]:
+    return [_status(item) for item in source_specs(default_only=default_only)]
+
+
+def sharing_policy() -> dict[str, list[str]]:
+    return {
+        "default_direct": [
+            item.key for item in SOURCE_REGISTRY
+            if item.default_enabled and item.integration == "direct_read"
+        ],
+        "default_delegate": [
+            item.key for item in SOURCE_REGISTRY
+            if item.default_enabled and item.integration == "helper_calls"
+        ],
+        "via_derived_store": [
+            item.key for item in SOURCE_REGISTRY
+            if item.integration == "via_prompt_history"
+        ],
+        "explicit_task_only": [
+            item.key for item in SOURCE_REGISTRY
+            if item.integration == "explicit_task_only"
+        ],
+    }
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Inspect C2 data/control source policy")
+    parser.add_argument("command", choices=("list", "status", "policy"), nargs="?", default="status")
+    parser.add_argument("--default-only", action="store_true")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.command == "list":
+        payload: Any = [asdict(item) for item in source_specs(default_only=args.default_only)]
+    elif args.command == "status":
+        payload = registry_status(default_only=args.default_only)
+    else:
+        payload = sharing_policy()
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
