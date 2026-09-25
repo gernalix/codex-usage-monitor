@@ -244,7 +244,7 @@ def push_health(payload: dict[str, Any], *, push_url: str | None = None, ping_ms
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Aggregate C2 health and publish it to Uptime Kuma")
-    parser.add_argument("command", choices=("status", "once"), nargs="?", default="status")
+    parser.add_argument("command", choices=("status", "once", "monitor-spec"), nargs="?", default="status")
     parser.add_argument("--quota-db", default=str(DEFAULT_QUOTA_DB))
     parser.add_argument("--archive-db", default=str(DEFAULT_ARCHIVE_DB))
     parser.add_argument("--history-db", default=str(DEFAULT_HISTORY_DB))
@@ -253,6 +253,9 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "monitor-spec":
+        print(json.dumps(KUMA_MONITOR_SPEC, sort_keys=True))
+        return 0
     started = time.monotonic()
     payload = aggregate_health(
         quota_db=Path(args.quota_db),
