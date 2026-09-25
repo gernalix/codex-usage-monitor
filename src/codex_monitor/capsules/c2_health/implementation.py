@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import datetime as dt
 import json
 import os
@@ -50,7 +51,7 @@ def _db(path: Path) -> sqlite3.Connection:
         raise C2HealthError(f"missing database: {resolved}")
     conn = sqlite3.connect(f"file:{resolved}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
-    return conn
+    return closing(conn)
 
 
 def _component(ok: bool, *, age: float | None = None, detail: str = "") -> dict[str, Any]:

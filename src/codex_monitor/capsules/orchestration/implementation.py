@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import json
 from pathlib import Path
 import re
@@ -23,7 +24,7 @@ def _connect_readonly(path: Path) -> sqlite3.Connection:
         raise C2OrchestratorError(f"missing database: {resolved}")
     conn = sqlite3.connect(f"file:{resolved}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
-    return conn
+    return closing(conn)
 
 
 def runnable_prompts(
