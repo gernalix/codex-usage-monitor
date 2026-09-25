@@ -1,0 +1,11 @@
+[Unit]
+Description=Run aggregate C2 health check
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=c2-health.service
+
+[Install]
+WantedBy=timers.target

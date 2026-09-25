@@ -16,7 +16,7 @@ ADAPTERS = {
     "codex_task_costs_incremental.py", "codex_usage_monitor.py",
     "codex_usage_publisher.py", "codex_usage_publisher_base.py",
     "codex_usage_publisher_legacy.py", "deploy_runtime.py",
-    "github_actions_watch.py", "c2_orchestrator.py",
+    "github_actions_watch.py", "c2_orchestrator.py", "c2_health.py",
 }
 
 
