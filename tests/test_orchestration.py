@@ -60,6 +60,11 @@ class OrchestrationTests(unittest.TestCase):
             "# state\n\n## Next action\nContinue from the checkpoint.\n",
             encoding="utf-8",
         )
+        (self.state_dir / "CHATGPT-20260924-GLOBAL-RECOVERY.md").write_text(
+            "Updated: 2026-01-02 12:00 Europe/Copenhagen\n\n"
+            "## Next action\nRun the C2 control plane.\n",
+            encoding="utf-8",
+        )
 
     def _make_history(self) -> None:
         conn = sqlite3.connect(self.history_db)
@@ -108,6 +113,10 @@ class OrchestrationTests(unittest.TestCase):
             "Continue from the checkpoint.",
         )
         self.assertEqual(payload["history"]["prompts"], 1)
+        self.assertEqual(
+            payload["global_checkpoint"]["next_action"],
+            "Run the C2 control plane.",
+        )
 
     def test_search_uses_shared_history_read_only(self) -> None:
         rows = orch.context_search("Android navigation", self.history_db)
@@ -124,6 +133,18 @@ class OrchestrationTests(unittest.TestCase):
         payload = orch.claim_prompt("111111", self.roadmap_repo, timeout=2)
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["prompt_id"], "111111")
+
+    def test_finish_delegates_to_roadmap_finish_helper(self) -> None:
+        tools = self.roadmap_repo / "tools"
+        tools.mkdir(exist_ok=True)
+        script = tools / "roadmap_finish.py"
+        script.write_text(
+            "import json\nprint(json.dumps({'status':'queued','prompt_id':'222222','result':'PASS'}))\n",
+            encoding="utf-8",
+        )
+        payload = orch.finish_prompt("222222", "PASS", self.roadmap_repo, timeout=2)
+        self.assertEqual(payload["status"], "queued")
+        self.assertEqual(payload["result"], "PASS")
 
 
 if __name__ == "__main__":
