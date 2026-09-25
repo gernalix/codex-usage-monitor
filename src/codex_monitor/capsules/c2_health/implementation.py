@@ -152,27 +152,28 @@ def aggregate_health(
     }
 
 
-def _read_env_value(path: Path, key: str) -> str | None:
+def _read_toml_push(path: Path, key: str) -> str | None:
     if not path.is_file():
         return None
-    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        name, value = line.split("=", 1)
-        if name.strip() == key:
-            return value.strip().strip('"').strip("'")
-    return None
+    try:
+        with path.open("rb") as handle:
+            push = tomllib.load(handle).get("push", {})
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    value = push.get(key) if isinstance(push, dict) else None
+    return str(value).strip() if value else None
+
+
 def load_push_url() -> str | None:
     direct = os.getenv("C2_KUMA_PUSH_URL", "").strip()
     if direct:
         return direct
     credentials_dir = os.getenv("CREDENTIALS_DIRECTORY", "").strip()
     if credentials_dir:
-        value = _read_env_value(Path(credentials_dir) / "c2-kuma.env", "C2_KUMA_PUSH_URL")
+        value = _read_toml_push(Path(credentials_dir) / "uptime-kuma.toml", "c2")
         if value:
             return value
-    return _read_env_value(DEFAULT_CREDENTIAL, "C2_KUMA_PUSH_URL")
+    return _read_toml_push(DEFAULT_CREDENTIAL, "c2")
 
 
 def build_push_url(base_url: str, *, status: str, message: str, ping_ms: float | None = None) -> str:

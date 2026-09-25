@@ -7,7 +7,7 @@ After=network-online.target
 Type=oneshot
 WorkingDirectory=/home/daniele/.local/lib/codex-usage-monitor/current
 Environment=PYTHONUNBUFFERED=1
-LoadCredential=c2-kuma.env:/home/daniele/.config/codex-usage-monitor/c2-kuma.env
+LoadCredential=uptime-kuma.toml:/home/daniele/.config/codex/secrets/fedora_system_monitor_uptime_kuma.toml
 ExecStart=/usr/bin/python3 /home/daniele/.local/lib/codex-usage-monitor/current/c2_health.py once
 TimeoutStartSec=60
 NoNewPrivileges=true
