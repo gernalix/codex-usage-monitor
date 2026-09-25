@@ -12,6 +12,7 @@ from typing import Any
 DEFAULT_ROADMAP_REPO = Path.home() / "projects/codex-roadmap"
 DEFAULT_ROADMAP_DB = DEFAULT_ROADMAP_REPO / "roadmap.sqlite"
 DEFAULT_HISTORY_DB = Path.home() / ".local/share/prompt-history/prompt_history.sqlite"
+DEFAULT_GLOBAL_CHECKPOINT = DEFAULT_ROADMAP_REPO / "operations/task-state/CHATGPT-20260924-GLOBAL-RECOVERY.md"
 
 
 class C2OrchestratorError(RuntimeError):
@@ -84,6 +85,21 @@ def checkpoint_next_action(
         "prompt_id": str(prompt_id),
         "state_file": str(candidates[0]) if candidates else None,
         "next_action": None,
+    }
+
+
+def global_checkpoint(
+    roadmap_repo: Path = DEFAULT_ROADMAP_REPO,
+) -> dict[str, str | None]:
+    path = roadmap_repo.expanduser() / "operations/task-state/CHATGPT-20260924-GLOBAL-RECOVERY.md"
+    if not path.is_file():
+        return {"state_file": str(path), "next_action": None, "updated": None}
+    text = path.read_text(encoding="utf-8", errors="replace")
+    updated_match = re.search(r"(?m)^Updated:\s*(.+)$", text)
+    return {
+        "state_file": str(path),
+        "next_action": _extract_next_action(text),
+        "updated": updated_match.group(1).strip() if updated_match else None,
     }
 
 
@@ -168,6 +184,7 @@ def orchestrator_status(
             "running": running,
             "runnable": runnable_prompts(roadmap_db, limit=10),
         },
+        "global_checkpoint": global_checkpoint(roadmap_repo),
         "history": _history_status(history_db),
     }
 
@@ -211,6 +228,54 @@ def claim_prompt(
     return payload
 
 
+def finish_prompt(
+    prompt_id: str,
+    result: str,
+    roadmap_repo: Path = DEFAULT_ROADMAP_REPO,
+    *,
+    confirm_executed: bool = True,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
+    normalized = str(result).upper()
+    allowed = {"PASS", "BLOCKED", "FAIL", "CANCELLED", "UNKNOWN"}
+    if normalized not in allowed:
+        raise C2OrchestratorError(f"invalid result: {result}")
+    script = roadmap_repo.expanduser() / "tools/roadmap_finish.py"
+    if not script.is_file():
+        raise C2OrchestratorError(f"missing single-writer finish helper: {script}")
+    command = [
+        "python3",
+        str(script),
+        "--repo",
+        str(roadmap_repo.expanduser()),
+        "--prompt-id",
+        str(prompt_id),
+        "--result",
+        normalized,
+    ]
+    if confirm_executed:
+        command.append("--confirm-executed")
+    completed = subprocess.run(
+        command,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=max(5.0, float(timeout) + 10.0),
+    )
+    payload_text = (completed.stdout or completed.stderr).strip()
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError as exc:
+        raise C2OrchestratorError(
+            f"roadmap finish returned invalid JSON: {payload_text[:500]}"
+        ) from exc
+    if completed.returncode != 0:
+        raise C2OrchestratorError(
+            str(payload.get("error") or payload.get("reason") or payload)
+        )
+    return payload
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="C2 orchestration over canonical roadmap/checkpoints/history"
@@ -235,6 +300,12 @@ def build_parser() -> argparse.ArgumentParser:
     claim = sub.add_parser("claim")
     claim.add_argument("prompt_id")
     claim.add_argument("--timeout", type=float, default=120.0)
+
+    finish = sub.add_parser("finish")
+    finish.add_argument("prompt_id")
+    finish.add_argument("result", choices=("PASS", "BLOCKED", "FAIL", "CANCELLED", "UNKNOWN"))
+    finish.add_argument("--timeout", type=float, default=120.0)
+    finish.add_argument("--no-confirm-executed", action="store_true")
     return parser
 
 
@@ -257,6 +328,14 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "claim":
             payload = claim_prompt(
                 args.prompt_id, roadmap_repo, timeout=args.timeout
+            )
+        elif args.command == "finish":
+            payload = finish_prompt(
+                args.prompt_id,
+                args.result,
+                roadmap_repo,
+                confirm_executed=not args.no_confirm_executed,
+                timeout=args.timeout,
             )
         else:
             raise AssertionError(args.command)
