@@ -56,9 +56,15 @@ C2 is the orchestration and analysis layer over existing canonical stores; it do
 - `prompt-history/prompt_history.sqlite` is a derived, rebuildable conversation/evidence warehouse for ChatGPT and Codex history.
 - ChatGPTExporter and native Codex session collectors remain independent producers. C2 consumes their normalized data rather than embedding provider-specific capture code.
 
-Use `c2_orchestrator.py status|runnable|next|search` for read-only orchestration context. `c2_orchestrator.py claim PROMPT_ID` delegates to `codex-roadmap/tools/roadmap_start.py`; it never writes `roadmap.sqlite` directly. Canonical lifecycle mutations therefore continue through the roadmap single writer.
+Use `c2_orchestrator.py status|runnable|next|search` for read-only orchestration context. `status` includes the global recovery checklist's current `Next action` as well as runnable/running roadmap state and prompt-history source status. `c2_orchestrator.py claim PROMPT_ID` delegates to `codex-roadmap/tools/roadmap_start.py`; `c2_orchestrator.py finish PROMPT_ID RESULT` delegates to `roadmap_finish.py`. C2 therefore orchestrates lifecycle without ever writing `roadmap.sqlite` directly.
 
-The intended long-term repository shape is a C2 control-plane monorepo containing orchestration, roadmap engine, usage, history access and supervision modules, while keeping the roadmap and history SQLite stores logically separate by responsibility.
+The intended long-term repository shape is a C2 control-plane monorepo containing orchestration, roadmap engine, usage, history access and supervision modules, while keeping the roadmap and history SQLite stores logically separate by responsibility. Until that migration is explicitly completed, `codex-roadmap` remains the canonical lifecycle owner and C2 accesses it through its public helpers.
+
+### Source sharing policy
+
+`c2_sources.py status|policy` exposes the versioned source registry. Default C2 context is deliberately narrow: roadmap/checkpoints, prompt-history, codex-usage, the native Codex archive, switcher state and github-autosync helper calls. ChatGPTExporter stays an independent producer and reaches C2 through `prompt-history`; its browser/provider capture code is not copied into C2.
+
+Personal application/message repositories such as PersonalHub, WhatsApp, Telegram, Discord and Grindr are `explicit_task_only`. C2 may use them read-only when a concrete task requires them, but they are not automatically ingested or joined into orchestration history. Fedora System Monitor and the ChatGPT RDC supervisor are also task-scoped dependencies rather than duplicated data stores.
 
 ## Quota monitor
 
@@ -86,7 +92,7 @@ Fedora System Monitor owns the narrow service-level Uptime Kuma heartbeat for qu
 
 ## Aggregate C2 health
 
-`c2_health.py status` checks five independent signals: successful/fresh quota acquisition, successful/fresh native session archive import, publisher state freshness, prompt-history freshness with required ChatGPT/Codex sources, and readable roadmap state. `c2_health.py once` sends the aggregate UP/DOWN state to the dedicated Kuma Push monitor using the `c2-kuma.env` systemd credential; the URL/token never belongs in Git.
+`c2_health.py status` checks five independent signals: successful/fresh quota acquisition, successful/fresh native session archive import, publisher state freshness, prompt-history freshness with required ChatGPT/Codex sources, and readable roadmap state. `c2_health.py once` sends the aggregate UP/DOWN state to the dedicated Kuma Push monitor using the shared root-only `uptime-kuma.toml` systemd credential and its `push.c2` endpoint; the URL/token never belongs in Git.
 
 This aggregate monitor is intentionally separate from the generic Fedora service monitor: a live Python process is not sufficient evidence that C2's data plane is current.
 
