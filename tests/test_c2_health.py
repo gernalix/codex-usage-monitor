@@ -128,6 +128,12 @@ class C2HealthTests(unittest.TestCase):
         self.assertFalse(payload["components"]["history"]["ok"])
         self.assertIn("chatgpt", payload["components"]["history"]["detail"])
 
+    def test_kuma_monitor_spec_matches_health_timer_contract(self) -> None:
+        self.assertEqual(health.KUMA_MONITOR_SPEC["name"], "C2")
+        self.assertEqual(health.KUMA_MONITOR_SPEC["type"], "push")
+        self.assertGreaterEqual(health.KUMA_MONITOR_SPEC["interval"], 300)
+        self.assertEqual(health.KUMA_MONITOR_SPEC["max_retries"], 2)
+
     def test_build_push_url_replaces_status_message_and_ping(self) -> None:
         url = health.build_push_url(
             "https://example.test/api/push/token?status=down&msg=old&ping=1",
