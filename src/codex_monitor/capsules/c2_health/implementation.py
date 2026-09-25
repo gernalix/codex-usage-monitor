@@ -19,6 +19,15 @@ DEFAULT_HISTORY_DB = Path.home() / ".local/share/prompt-history/prompt_history.s
 DEFAULT_ROADMAP_DB = Path.home() / "projects/codex-roadmap/roadmap.sqlite"
 DEFAULT_PUBLISHER_STATE = Path.home() / ".local/state/codex-usage-publisher/github-actions-watch.json"
 DEFAULT_CREDENTIAL = Path.home() / ".config/codex/secrets/fedora_system_monitor_uptime_kuma.toml"
+KUMA_MONITOR_SPEC = {
+    "name": "C2",
+    "type": "push",
+    "interval": 600,
+    "retry_interval": 120,
+    "max_retries": 2,
+    "timeout": 48,
+    "description": "Aggregate C2 control-plane health: quota, Codex archive, publisher, prompt-history, roadmap.",
+}
 
 
 class C2HealthError(RuntimeError):
