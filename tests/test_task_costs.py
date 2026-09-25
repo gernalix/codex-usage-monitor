@@ -232,6 +232,52 @@ class TaskCostTests(unittest.TestCase):
             self.assertEqual(sum(row["total_tokens"] for row in prompts), 310)
             self.assertEqual(costs.select_prompt_rows(prompts, "624831", include_incomplete=True), [])
 
+    def test_unattributed_goal_is_omitted_until_roadmap_start_assigns_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout.jsonl"
+            write_jsonl(
+                path,
+                [
+                    {"timestamp": "2026-09-22T18:00:00Z", "type": "session_meta", "payload": {"session_id": "unattributed-goal"}},
+                    {
+                        "timestamp": "2026-09-22T18:00:01Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": '<codex_internal_context source="goal">continue</codex_internal_context>'}],
+                        },
+                    },
+                    token_event("2026-09-22T18:00:02Z", input_tokens=20, cached=10, output=5, reasoning=1, total=25, quota=1.0),
+                    {"timestamp": "2026-09-22T18:00:03Z", "type": "event_msg", "payload": {"type": "task_complete"}},
+                    {
+                        "timestamp": "2026-09-22T18:00:04Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "custom_tool_call_output",
+                            "output": '{"prompt_id":"613102","roadmap_status":"running","status":"ok","task_branch":"task/613102"}',
+                        },
+                    },
+                    {
+                        "timestamp": "2026-09-22T18:00:05Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": '<codex_internal_context source="goal">continue</codex_internal_context>'}],
+                        },
+                    },
+                    token_event("2026-09-22T18:00:06Z", input_tokens=40, cached=20, output=10, reasoning=2, total=50, quota=1.1),
+                    {"timestamp": "2026-09-22T18:00:07Z", "type": "event_msg", "payload": {"type": "task_complete"}},
+                ],
+            )
+
+            _session, prompts = costs.analyze_with_prompts(path)
+
+            self.assertEqual([row["prompt_id"] for row in prompts], ["613102"])
+            self.assertEqual(prompts[0]["total_tokens"], 25)
+            self.assertEqual(costs.select_prompt_rows(prompts, "624831", include_incomplete=True), [])
+
 
 
 if __name__ == "__main__":
