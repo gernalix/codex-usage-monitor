@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import sqlite3
 import time
+import tomllib
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -17,7 +18,7 @@ DEFAULT_ARCHIVE_DB = Path.home() / ".local/share/codex-session-archive/index/arc
 DEFAULT_HISTORY_DB = Path.home() / ".local/share/prompt-history/prompt_history.sqlite"
 DEFAULT_ROADMAP_DB = Path.home() / "projects/codex-roadmap/roadmap.sqlite"
 DEFAULT_PUBLISHER_STATE = Path.home() / ".local/state/codex-usage-publisher/github-actions-watch.json"
-DEFAULT_CREDENTIAL = Path.home() / ".config/codex-usage-monitor/c2-kuma.env"
+DEFAULT_CREDENTIAL = Path.home() / ".config/codex/secrets/fedora_system_monitor_uptime_kuma.toml"
 
 
 class C2HealthError(RuntimeError):

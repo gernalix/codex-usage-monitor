@@ -37,6 +37,7 @@ Native Codex sessions:
 - `codex-usage-monitor.timer` → quota acquisition every 15 minutes.
 - `codex-session-archive.timer` → passive local archive/index updates.
 - `codex-usage-publisher.timer` → usage/prompt/chat publication and complete redacted native chat dumps.
+- `c2-health.timer` → aggregate C2 health push to the dedicated Uptime Kuma monitor every 5 minutes.
 
 The quota-monitor service receives `codex-usage-monitor.env` and the shared
 `telegram.env` through systemd `LoadCredential=`. Runtime code resolves those
@@ -45,6 +46,19 @@ migration sources/fallbacks so a later host-local switch to
 `LoadCredentialEncrypted=` does not require another application-code change.
 
 There must be no equivalent active `codex-usage-monitor` service/timer on the Oracle VM after the Fedora cutover is validated.
+
+## C2 control plane
+
+C2 is the orchestration and analysis layer over existing canonical stores; it does not duplicate them.
+
+- `codex-roadmap/roadmap.sqlite` remains authoritative for prompt lifecycle, dependencies, queue order and execution metadata.
+- `codex-roadmap/operations/task-state/*.md` remains the durable operational checkpoint surface while the checklist-to-DB convergence is pending.
+- `prompt-history/prompt_history.sqlite` is a derived, rebuildable conversation/evidence warehouse for ChatGPT and Codex history.
+- ChatGPTExporter and native Codex session collectors remain independent producers. C2 consumes their normalized data rather than embedding provider-specific capture code.
+
+Use `c2_orchestrator.py status|runnable|next|search` for read-only orchestration context. `c2_orchestrator.py claim PROMPT_ID` delegates to `codex-roadmap/tools/roadmap_start.py`; it never writes `roadmap.sqlite` directly. Canonical lifecycle mutations therefore continue through the roadmap single writer.
+
+The intended long-term repository shape is a C2 control-plane monorepo containing orchestration, roadmap engine, usage, history access and supervision modules, while keeping the roadmap and history SQLite stores logically separate by responsibility.
 
 ## Quota monitor
 
@@ -68,7 +82,13 @@ SQLite views include:
 - `reset_count_changes`
 - `recent_failures`
 
-Fedora System Monitor owns the Uptime Kuma heartbeat for acquisition success and freshness. The collector remains local on Fedora.
+Fedora System Monitor owns the narrow service-level Uptime Kuma heartbeat for quota acquisition. C2 additionally owns an aggregate monitor.
+
+## Aggregate C2 health
+
+`c2_health.py status` checks five independent signals: successful/fresh quota acquisition, successful/fresh native session archive import, publisher state freshness, prompt-history freshness with required ChatGPT/Codex sources, and readable roadmap state. `c2_health.py once` sends the aggregate UP/DOWN state to the dedicated Kuma Push monitor using the `c2-kuma.env` systemd credential; the URL/token never belongs in Git.
+
+This aggregate monitor is intentionally separate from the generic Fedora service monitor: a live Python process is not sufficient evidence that C2's data plane is current.
 
 ## Fedora native Codex session archive
 
