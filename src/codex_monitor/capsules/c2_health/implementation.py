@@ -200,3 +200,67 @@ def _health_message(payload: dict[str, Any]) -> str:
         if age is not None:
             ages.append(f"{name}={int(age // 60)}m")
     return "C2 healthy" + ("; " + " ".join(ages) if ages else "")
+def push_health(payload: dict[str, Any], *, push_url: str | None = None, ping_ms: float | None = None) -> None:
+    url = (push_url or load_push_url() or "").strip()
+    if not url:
+        raise C2HealthError("C2 Kuma push URL is not configured")
+    target = build_push_url(
+        url,
+        status=str(payload["status"]),
+        message=_health_message(payload),
+        ping_ms=ping_ms,
+    )
+    request = urllib.request.Request(
+        target,
+        headers={"User-Agent": "C2-health/1"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            body = response.read(4096)
+            if not 200 <= response.status < 300:
+                raise C2HealthError(f"Uptime Kuma returned HTTP {response.status}")
+    except OSError as exc:
+        raise C2HealthError(f"Uptime Kuma push failed: {type(exc).__name__}") from exc
+    try:
+        decoded = json.loads(body.decode("utf-8", "replace"))
+    except json.JSONDecodeError as exc:
+        raise C2HealthError("Uptime Kuma returned invalid JSON") from exc
+    if not isinstance(decoded, dict) or decoded.get("ok") is not True:
+        raise C2HealthError("Uptime Kuma rejected the heartbeat")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Aggregate C2 health and publish it to Uptime Kuma")
+    parser.add_argument("command", choices=("status", "once"), nargs="?", default="status")
+    parser.add_argument("--quota-db", default=str(DEFAULT_QUOTA_DB))
+    parser.add_argument("--archive-db", default=str(DEFAULT_ARCHIVE_DB))
+    parser.add_argument("--history-db", default=str(DEFAULT_HISTORY_DB))
+    parser.add_argument("--roadmap-db", default=str(DEFAULT_ROADMAP_DB))
+    parser.add_argument("--publisher-state", default=str(DEFAULT_PUBLISHER_STATE))
+    return parser
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    started = time.monotonic()
+    payload = aggregate_health(
+        quota_db=Path(args.quota_db),
+        archive_db=Path(args.archive_db),
+        history_db=Path(args.history_db),
+        roadmap_db=Path(args.roadmap_db),
+        publisher_state=Path(args.publisher_state),
+    )
+    if args.command == "once":
+        try:
+            push_health(payload, ping_ms=(time.monotonic() - started) * 1000.0)
+            payload["kuma"] = "delivered"
+        except C2HealthError as exc:
+            payload["kuma"] = "failed"
+            payload["kuma_error"] = str(exc)
+            print(json.dumps(payload, sort_keys=True))
+            return 2
+    print(json.dumps(payload, sort_keys=True))
+    return 0 if payload["healthy"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
