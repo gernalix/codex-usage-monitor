@@ -316,14 +316,16 @@ def analyze_with_prompts(path: Path) -> tuple[dict[str, Any], list[dict[str, Any
             # row from being confused with a mid-run snapshot.
             if top == "event_msg" and ptype == "task_complete" and active is not None:
                 active["completion_state"] = "task_complete"
-                prompt_rows.append(finalize_prompt(active, session_id, str(path)))
+                if active.get("prompt_id"):
+                    prompt_rows.append(finalize_prompt(active, session_id, str(path)))
                 active = None
 
     # A running/abnormally terminated prompt is retained for diagnostics but is
     # explicitly marked incomplete; exact-query helpers exclude it by default.
     if active is not None:
         active["completion_state"] = "eof_incomplete"
-        prompt_rows.append(finalize_prompt(active, session_id, str(path)))
+        if active.get("prompt_id"):
+            prompt_rows.append(finalize_prompt(active, session_id, str(path)))
 
     duration = (last_ts - first_ts).total_seconds() if first_ts and last_ts else None
     input_tokens = latest_usage["input_tokens"]
