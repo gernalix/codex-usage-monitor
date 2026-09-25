@@ -28,6 +28,7 @@ RUNTIME_FILES = (
     "github_actions_watch.py",
     "c2_orchestrator.py",
     "c2_health.py",
+    "c2_sources.py",
 )
 RUNTIME_PACKAGE = Path("src/codex_monitor")
 

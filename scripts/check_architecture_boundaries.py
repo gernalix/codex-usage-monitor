@@ -17,6 +17,7 @@ ADAPTERS = {
     "codex_usage_publisher.py", "codex_usage_publisher_base.py",
     "codex_usage_publisher_legacy.py", "deploy_runtime.py",
     "github_actions_watch.py", "c2_orchestrator.py", "c2_health.py",
+    "c2_sources.py",
 }
 
 
