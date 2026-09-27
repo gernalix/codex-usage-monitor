@@ -92,6 +92,44 @@ class SessionArchiveTests(unittest.TestCase):
             self.assertEqual(rows[0]["event_count"], 5)
             self.assertEqual(rows[0]["status"], "complete")
 
+    def test_prompt_id_migration_and_catalog_are_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "archive"
+            archive.init_db(root)
+            with archive.connect_db(root) as con:
+                con.execute("DROP TABLE session_prompt_ids")
+                con.execute(
+                    """INSERT INTO sessions (
+                        archive_id,session_id,source_path,raw_archive_path,normalized_path,
+                        markdown_path,manifest_path,source_sha256,source_size_bytes,
+                        raw_archive_size_bytes,raw_archive_sha256,event_count,invalid_json_lines,
+                        status,prompt_ids,imported_at_utc,updated_at_utc
+                    ) VALUES ('a1','s1','src','raw','norm','md','manifest','sha',1,1,'rawsha',2,0,
+                              'complete','731462, 831004,731462','2026-09-01T00:00:00Z',
+                              '2026-09-02T00:00:00Z')"""
+                )
+            archive.init_db(root)
+            archive.init_db(root)
+            with archive.connect_db(root) as con:
+                raw = con.execute("SELECT prompt_ids FROM sessions WHERE archive_id='a1'").fetchone()[0]
+                ids = [r[0] for r in con.execute(
+                    "SELECT prompt_id FROM session_prompt_ids WHERE archive_id='a1' ORDER BY prompt_id"
+                )]
+                catalog = con.execute("SELECT * FROM session_catalog WHERE archive_id='a1'").fetchone()
+                indexes = {r[0] for r in con.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                )}
+                foreign_keys = con.execute("PRAGMA foreign_key_check").fetchall()
+                integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
+            self.assertEqual(raw, '731462, 831004,731462')
+            self.assertEqual(ids, ['731462', '831004'])
+            self.assertEqual(catalog['normalized_prompt_ids'], '731462,831004')
+            self.assertEqual(catalog['updated_at_utc'], '2026-09-02T00:00:00Z')
+            self.assertIn('idx_sessions_last_timestamp', indexes)
+            self.assertIn('idx_sessions_updated_at', indexes)
+            self.assertEqual(foreign_keys, [])
+            self.assertEqual(integrity, 'ok')
+
     def test_incomplete_session_models_safe_abnormal_termination(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "archive"
