@@ -309,6 +309,9 @@ def connect_db(root: Path) -> sqlite3.Connection:
 
 def init_db(root: Path) -> None:
     with connect_db(root) as con:
+        prompt_link_table_exists = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_prompt_ids'"
+        ).fetchone() is not None
         legacy = con.execute("PRAGMA table_info(sessions)").fetchall()
         if legacy and not any(row["name"] == "archive_id" for row in legacy):
             con.executescript(
@@ -353,10 +356,31 @@ def init_db(root: Path) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions(session_id);
             CREATE INDEX IF NOT EXISTS idx_sessions_first_timestamp ON sessions(first_timestamp_utc);
+            CREATE INDEX IF NOT EXISTS idx_sessions_last_timestamp ON sessions(last_timestamp_utc);
+            CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at_utc);
             CREATE INDEX IF NOT EXISTS idx_sessions_cwd ON sessions(cwd);
             CREATE INDEX IF NOT EXISTS idx_sessions_repo_root ON sessions(repo_root);
-            CREATE INDEX IF NOT EXISTS idx_sessions_prompt_ids ON sessions(prompt_ids);
             CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
+            DROP INDEX IF EXISTS idx_sessions_prompt_ids;
+
+            CREATE TABLE IF NOT EXISTS session_prompt_ids (
+                archive_id TEXT NOT NULL REFERENCES sessions(archive_id) ON DELETE CASCADE,
+                prompt_id TEXT NOT NULL,
+                PRIMARY KEY (archive_id, prompt_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_session_prompt_ids_prompt_id
+                ON session_prompt_ids(prompt_id);
+
+            CREATE VIEW IF NOT EXISTS session_catalog AS
+            SELECT s.archive_id, s.session_id, s.status, s.first_timestamp_utc,
+                   s.last_timestamp_utc, s.cwd, s.repo_root, s.git_branch,
+                   s.git_remote, s.prompt_ids,
+                   (SELECT group_concat(prompt_id, ',')
+                    FROM session_prompt_ids p WHERE p.archive_id=s.archive_id) AS normalized_prompt_ids,
+                   s.event_count, s.invalid_json_lines, s.source_path,
+                   s.raw_archive_path, s.normalized_path, s.markdown_path,
+                   s.manifest_path, s.imported_at_utc, s.updated_at_utc
+            FROM sessions s;
 
             CREATE TABLE IF NOT EXISTS source_files (
                 source_path TEXT PRIMARY KEY,
@@ -384,7 +408,28 @@ def init_db(root: Path) -> None:
             );
             """
         )
+        if not prompt_link_table_exists:
+            _backfill_session_prompt_ids(con)
         con.commit()
+
+
+def _write_session_prompt_ids(
+    con: sqlite3.Connection, archive_id: str, raw_prompt_ids: str, *, replace: bool = False
+) -> None:
+    ids = sorted({value.strip() for value in str(raw_prompt_ids or "").split(",") if value.strip()})
+    if replace:
+        con.execute("DELETE FROM session_prompt_ids WHERE archive_id=?", (archive_id,))
+    con.executemany(
+        "INSERT OR IGNORE INTO session_prompt_ids(archive_id,prompt_id) VALUES(?,?)",
+        [(archive_id, prompt_id) for prompt_id in ids],
+    )
+
+
+def _backfill_session_prompt_ids(con: sqlite3.Connection) -> None:
+    """Idempotently normalize retained raw prompt ID lists for existing rows."""
+    rows = con.execute("SELECT archive_id,prompt_ids FROM sessions").fetchall()
+    for row in rows:
+        _write_session_prompt_ids(con, row["archive_id"], row["prompt_ids"])
 
 
 def normalize_session(path: Path, source_path: Path | None = None) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
@@ -623,6 +668,9 @@ def import_session(root: Path, source_root: Path, path: Path) -> tuple[str, bool
                 now,
             ),
         )
+        _write_session_prompt_ids(
+            con, archive_id, ",".join(manifest.get("prompt_ids") or []), replace=True
+        )
         con.commit()
     return archive_id, True, manifest
 
@@ -756,8 +804,11 @@ def rows_for_filters(root: Path, args: argparse.Namespace) -> list[sqlite3.Row]:
         clauses.append("session_id=?")
         params.append(args.session_id)
     if getattr(args, "prompt_id", None):
-        clauses.append("(',' || prompt_ids || ',') LIKE ?")
-        params.append(f"%,{args.prompt_id},%")
+        clauses.append(
+            "EXISTS (SELECT 1 FROM session_prompt_ids p "
+            "WHERE p.archive_id=sessions.archive_id AND p.prompt_id=?)"
+        )
+        params.append(str(args.prompt_id))
     if getattr(args, "cwd", None):
         clauses.append("cwd LIKE ?")
         params.append(f"%{args.cwd}%")

@@ -791,6 +791,7 @@ def init_db(cfg: Config) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_quota_snapshots_acquired ON quota_snapshots(acquired_at_utc);
             CREATE INDEX IF NOT EXISTS idx_quota_snapshots_status ON quota_snapshots(acquisition_status, acquired_at_utc);
+            CREATE INDEX IF NOT EXISTS idx_quota_snapshots_run_id ON quota_snapshots(run_id);
 
             CREATE TABLE IF NOT EXISTS rate_limit_snapshots (
                 rate_limit_snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -825,6 +826,7 @@ def init_db(cfg: Config) -> None:
                 created_at_utc TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_notification_events_key_created ON notification_events(event_key, created_at_utc);
+            CREATE INDEX IF NOT EXISTS idx_notification_events_snapshot_id ON notification_events(snapshot_id);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_events_quota_v2_sent_key ON notification_events(event_key) WHERE sent=1 AND event_key LIKE 'quota_change:v2:%';
             CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_events_quota_v2_sending_key ON notification_events(event_key) WHERE decision='sending' AND event_key LIKE 'quota_change:v2:%';
 

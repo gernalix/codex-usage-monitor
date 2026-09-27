@@ -577,10 +577,13 @@ class ResetCountParsingTests(unittest.TestCase):
             with monitor.connect_db(cfg) as con:
                 cols = [row["name"] for row in con.execute("PRAGMA table_info(quota_snapshots)").fetchall()]
                 child = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='rate_limit_snapshots'").fetchone()
+                indexes = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='index'")}
                 fk = con.execute("PRAGMA foreign_key_check").fetchall()
                 integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
         self.assertIn("sanitized_payload_json", cols)
         self.assertIsNotNone(child)
+        self.assertIn("idx_quota_snapshots_run_id", indexes)
+        self.assertIn("idx_notification_events_snapshot_id", indexes)
         self.assertEqual(fk, [])
         self.assertEqual(integrity, "ok")
 
