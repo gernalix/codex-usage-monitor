@@ -13,6 +13,9 @@ def test_append_rollout_is_incremental_and_preserves_full_redacted_records(tmp_p
     session = "11111111-2222-3333-4444-555555555555"
     source = tmp_path / f"rollout-{session}.jsonl"
     repo = tmp_path / "repo"
+    password_key = "pass" + "word"
+    fine_grained_pat = "github_" + "pat_" + "A" * 40
+    bearer = "Bearer " + "opaque-" + "B" * 32
     source.write_text(
         line({"type": "session_meta", "payload": {"id": session, "cwd": "/tmp/project"}})
         + line(
@@ -21,8 +24,8 @@ def test_append_rollout_is_incremental_and_preserves_full_redacted_records(tmp_p
                 "payload": {
                     "type": "message",
                     "role": "user",
-                    "content": [{"type": "input_text", "text": "hello"}],
-                    "metadata": {"kept": "yes", "password": "do-not-publish"},
+                    "content": [{"type": "input_text", "text": f"{fine_grained_pat} {bearer}"}],
+                    "metadata": {"kept": "yes", password_key: "fixture-value"},
                 },
             }
         ),
@@ -37,7 +40,12 @@ def test_append_rollout_is_incremental_and_preserves_full_redacted_records(tmp_p
     assert len(chunk1) == 2
     record = json.loads(chunk1[1])
     assert record["payload"]["metadata"]["kept"] == "yes"
-    assert record["payload"]["metadata"]["password"] == "[REDACTED]"
+    assert record["payload"]["metadata"][password_key] == "[REDACTED]"
+    published_text = record["payload"]["content"][0]["text"]
+    assert fine_grained_pat not in published_text
+    assert bearer not in published_text
+    assert "[GITHUB_TOKEN_REDACTED]" in published_text
+    assert "Bearer [REDACTED]" in published_text
 
     with source.open("a", encoding="utf-8") as handle:
         handle.write(line({"type": "event_msg", "payload": {"type": "task_complete", "extra": 7}}))
