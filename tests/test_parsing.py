@@ -68,6 +68,45 @@ class ResetCountParsingTests(unittest.TestCase):
         )
         con.commit()
 
+    def test_reset_credit_expiries_persist_and_render(self) -> None:
+        payload = {"rateLimitResetCredits": {"availableCount": 2, "credits": [
+            {"id": "later", "status": "available", "expiresAt": 1793300245},
+            {"id": "used", "status": "consumed", "expiresAt": 1790109167},
+            {"id": "first", "status": "available", "expiresAt": 1792701167},
+            "invalid",
+        ]}}
+        reading = monitor.reading_from_payload(payload)
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_cfg(tmp)
+            monitor.init_db(cfg)
+            con = monitor.connect_db(cfg)
+            try:
+                sid = monitor.insert_snapshot(con, monitor.start_run(con), "ok", reading)
+                row = con.execute("SELECT * FROM quota_snapshots WHERE snapshot_id=?", (sid,)).fetchone()
+                credits = json.loads(row["reset_credits_json"])
+                self.assertEqual(len(credits), 3)
+                lines = monitor.reset_expiry_message_lines(row)
+                self.assertEqual(lines, ["Reset gratuito 1: 22-10-2026 22:32:47 CEST", "Reset gratuito 2: 29-10-2026 19:57:25 CET"])
+                self.assertEqual(monitor.snapshot_message_lines(row)[-2:], lines)
+                previous = monitor.quota_notification_state(row)
+                self.assertEqual(monitor.quota_change_message_lines(previous, row)[-2:], lines)
+                con.execute("UPDATE quota_snapshots SET reset_credits_json=NULL WHERE snapshot_id=?", (sid,))
+                legacy = con.execute("SELECT * FROM quota_snapshots WHERE snapshot_id=?", (sid,)).fetchone()
+                self.assertEqual(monitor.reset_expiry_message_lines(legacy), lines)
+            finally:
+                con.close()
+
+    def test_reset_credit_missing_and_malformed_expiries(self) -> None:
+        payload = {"usageLimitResetCredits": {"credits": [
+            {"id": "missing", "status": "available"},
+            {"id": "bad", "status": "available", "expiresAt": "invalid"},
+        ]}}
+        credits = monitor.reset_credits_from_payload(payload)
+        self.assertEqual(len(credits), 2)
+        self.assertTrue(all(item["expires_at_utc"] is None for item in credits))
+        self.assertEqual(monitor.reset_credits_from_payload({}), ())
+        self.assertEqual(monitor.reset_credits_from_payload({"rateLimitResetCredits": {"credits": []}}), ())
+
     def test_structured_one_reset(self) -> None:
         payload = {"rateLimitResetCredits": {"availableCount": 1, "credits": [{"status": "available"}]}}
         value, warnings = monitor.reset_count_from_payload(payload)
