@@ -91,6 +91,7 @@ class QuotaReading:
     sanitized_excerpt: str
     parse_warnings: tuple[str, ...]
     payload: dict[str, Any] | None
+    reset_credits: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -703,6 +704,27 @@ def reset_count_from_structured(payload: dict[str, Any]) -> tuple[int | None, li
     return None, warnings
 
 
+def reset_credits_from_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    root = payload.get("rateLimitResetCredits")
+    if not isinstance(root, dict):
+        root = payload.get("usageLimitResetCredits")
+    if not isinstance(root, dict) or not isinstance(root.get("credits"), list):
+        return ()
+    credits = []
+    for item in root["credits"]:
+        if not isinstance(item, dict):
+            continue
+        credits.append({
+            "id": item.get("id"),
+            "status": str(item.get("status", "")).lower(),
+            "granted_at_utc": epoch_to_utc_iso(item.get("grantedAt")),
+            "expires_at_utc": epoch_to_utc_iso(item.get("expiresAt")),
+            "reset_type": item.get("resetType"),
+            "title": item.get("title"),
+        })
+    return tuple(sorted(credits, key=lambda item: (item["expires_at_utc"] or "~", str(item["id"]))))
+
+
 def reset_count_from_payload(payload: dict[str, Any]) -> tuple[int | None, list[str]]:
     structured, warnings = reset_count_from_structured(payload)
     if structured is not None:
@@ -732,6 +754,7 @@ def reading_from_payload(payload: dict[str, Any]) -> QuotaReading:
         sanitized_excerpt=sanitize(payload),
         parse_warnings=tuple(quota_warnings + reset_warnings),
         payload=payload,
+        reset_credits=reset_credits_from_payload(payload),
     )
 
 
@@ -842,6 +865,7 @@ def init_db(cfg: Config) -> None:
             """
         )
         ensure_column(con, "quota_snapshots", "sanitized_payload_json", "TEXT")
+        ensure_column(con, "quota_snapshots", "reset_credits_json", "TEXT")
         con.executescript(
             """
 
@@ -864,7 +888,7 @@ def init_db(cfg: Config) -> None:
             CREATE VIEW history AS
             SELECT snapshot_id, acquired_at_utc, acquisition_status, weekly_used_percent,
                    weekly_remaining_percent, weekly_reset_at_utc,
-                   usage_limit_resets_available, source_format, provenance,
+                   usage_limit_resets_available, reset_credits_json, source_format, provenance,
                    sanitized_error, parse_warnings
             FROM quota_snapshots
             ORDER BY acquired_at_utc DESC, snapshot_id DESC;
@@ -1114,6 +1138,7 @@ def insert_snapshot(
         "weekly_remaining_percent": reading.weekly_remaining_percent if reading else None,
         "weekly_reset_at_utc": reading.weekly_reset_at_utc if reading else None,
         "usage_limit_resets_available": reading.usage_limit_resets_available if reading else None,
+        "reset_credits_json": sanitized_payload_json(list(reading.reset_credits)) if reading else None,
         "sanitized_error": sanitize(error, 700) if error else None,
         "sanitized_excerpt": reading.sanitized_excerpt if reading else None,
         "sanitized_payload_json": sanitized_payload_json(reading.payload) if reading and reading.payload is not None else None,
@@ -1247,13 +1272,33 @@ def format_display_datetime(value: Any) -> str:
     return parsed.astimezone(DISPLAY_TZ).strftime("%d-%m-%y %H:%M")
 
 
+def snapshot_reset_credits(row: sqlite3.Row) -> list[dict[str, Any]]:
+    if "reset_credits_json" in row.keys() and row["reset_credits_json"]:
+        return json.loads(row["reset_credits_json"])
+    if "sanitized_payload_json" in row.keys() and row["sanitized_payload_json"]:
+        return list(reset_credits_from_payload(json.loads(row["sanitized_payload_json"])))
+    return []
+
+
+def reset_expiry_message_lines(row: sqlite3.Row) -> list[str]:
+    available = [item for item in snapshot_reset_credits(row) if item["status"] == "available"]
+    lines = []
+    for number, item in enumerate(available, 1):
+        value = item["expires_at_utc"]
+        expiry = "scadenza non disponibile"
+        if value:
+            expiry = dt.datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(DISPLAY_TZ).strftime("%d-%m-%Y %H:%M:%S %Z")
+        lines.append(f"Reset gratuito {number}: {expiry}")
+    return lines
+
+
 def snapshot_message_lines(row: sqlite3.Row, *, include_source: bool = False) -> list[str]:
     reset_count = "unavailable" if row["usage_limit_resets_available"] is None else str(row["usage_limit_resets_available"])
     return [
         f"Weekly remaining: {fmt_value(row['weekly_remaining_percent'], '%')}",
         f"Weekly reset: {format_display_datetime(row['weekly_reset_at_utc'])}",
         f"Usage limit resets available: {reset_count}",
-    ]
+    ] + reset_expiry_message_lines(row)
 
 
 def quota_change_message_lines(previous_state: dict[str, str], current: sqlite3.Row) -> list[str]:
@@ -1269,7 +1314,7 @@ def quota_change_message_lines(previous_state: dict[str, str], current: sqlite3.
         f"Weekly remaining: {previous_state.get('weekly_remaining', 'unavailable')}% -> {current_state['weekly_remaining']}% ({delta_text})",
         f"Weekly reset: {current_state['weekly_reset']}",
         f"Usage limit resets available: {current_state['usage_limit_resets_available']}",
-    ]
+    ] + reset_expiry_message_lines(current)
 
 
 def quota_notification_state(row: sqlite3.Row) -> dict[str, str]:
@@ -1613,7 +1658,10 @@ def command_status(args: argparse.Namespace) -> int:
         if row is None:
             print("Codex usage monitor: no snapshots")
             return 1
-        print(json.dumps(dict(row), sort_keys=True))
+        state = dict(row)
+        state["reset_credits"] = snapshot_reset_credits(row)
+        state["reset_expiry_display"] = reset_expiry_message_lines(row)
+        print(json.dumps(state, sort_keys=True))
     return 0
 
 

@@ -52,7 +52,7 @@ This repository owns Codex session/archive, tokens, costs and usage telemetry on
 
 ## Quota monitor
 
-The monitor reads the Codex app-server JSON-RPC method `account/rateLimits/read`, stores append-only observations in SQLite, and can send deduplicated Telegram notifications.
+The monitor reads the Codex app-server JSON-RPC method `account/rateLimits/read`, stores append-only observations in SQLite, and can send deduplicated Telegram notifications. Individual reset credits (ID, status, grant and expiry timestamps, type and title) are stored in `quota_snapshots.reset_credits_json`. Status and quota notifications show each available free reset’s expiry in Europe/Copenhagen time, earliest first. Existing snapshots fall back to their stored source payload; missing expiry timestamps are shown as unavailable.
 
 Commands:
 
