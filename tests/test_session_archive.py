@@ -64,6 +64,8 @@ class SessionArchiveTests(unittest.TestCase):
             self.assertTrue(did_import)
             self.assertEqual(manifest["status"], "complete")
             self.assertEqual(manifest["prompt_ids"], ["4"])
+            self.assertNotIn("markdown_path", manifest)
+            self.assertFalse((root / "markdown").exists())
             raw_path = Path(manifest["raw_archive_path"])
             self.assertTrue(raw_path.exists())
             with gzip.open(raw_path, "rt", encoding="utf-8") as handle:
@@ -97,6 +99,7 @@ class SessionArchiveTests(unittest.TestCase):
             root = Path(tmp) / "archive"
             archive.init_db(root)
             with archive.connect_db(root) as con:
+                con.execute("ALTER TABLE sessions ADD COLUMN markdown_path TEXT NOT NULL DEFAULT 'legacy.md'")
                 con.execute("DROP TABLE session_prompt_ids")
                 con.execute(
                     """INSERT INTO sessions (
@@ -129,6 +132,9 @@ class SessionArchiveTests(unittest.TestCase):
             self.assertIn('idx_sessions_updated_at', indexes)
             self.assertEqual(foreign_keys, [])
             self.assertEqual(integrity, 'ok')
+            with archive.connect_db(root) as con:
+                self.assertNotIn('markdown_path', [r[1] for r in con.execute('PRAGMA table_info(sessions)').fetchall()])
+            self.assertTrue((root / 'index/archive.pre-jsonl-only.sqlite').exists())
 
     def test_incomplete_session_models_safe_abnormal_termination(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -180,6 +186,31 @@ class SessionArchiveTests(unittest.TestCase):
             self.assertEqual(runs[0]["sessions_imported"], 1)
             self.assertEqual(runs[1]["sessions_imported"], 0)
             self.assertEqual(runs[1]["sessions_skipped"], 1)
+
+    def test_export_contains_jsonl_only_without_markdown(self) -> None:
+        import tarfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "archive"
+            source = Path(tmp) / "sessions"
+            session_id = "019fd1da-cc5d-7db1-b880-a14be6111c38"
+            src = source / f"rollout-2026-08-05T12-00-00-{session_id}.jsonl"
+            write_jsonl(src, self.make_rows(session_id))
+            archive.import_session(root, source, src)
+            args = argparse_like(root, source_root=source)
+            args.output = str(root / "export.tar.gz")
+            args.limit = 100
+            args.session_id = None
+            args.status = None
+            args.prompt_id = None
+            args.cwd = None
+            args.repo_root = None
+            from codex_monitor.capsules.session_archive.implementation import command_export
+            command_export(args)
+            with tarfile.open(args.output) as tar:
+                names = tar.getnames()
+            self.assertTrue(any('/raw/' in n and n.endswith('.jsonl.gz') for n in names))
+            self.assertTrue(any('/normalized/' in n and n.endswith('.jsonl') for n in names))
+            self.assertFalse(any('/markdown/' in n for n in names))
 
     def test_distinct_rollout_files_with_same_session_id_are_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
