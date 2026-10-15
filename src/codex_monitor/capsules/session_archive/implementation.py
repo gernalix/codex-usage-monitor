@@ -315,6 +315,18 @@ def init_db(root: Path) -> None:
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_prompt_ids'"
         ).fetchone() is not None
         legacy = con.execute("PRAGMA table_info(sessions)").fetchall()
+        if any(row["name"] == "markdown_path" for row in legacy):
+            # One-time, recoverable SQLite migration. Do not retain misleading
+            # Markdown references once JSONL is the only transcript format.
+            backup = root / "index/archive.pre-jsonl-only.sqlite"
+            if not backup.exists():
+                backup_sqlite(db_path := root / "index/archive.sqlite", backup)
+                with sqlite3.connect(backup) as snapshot:
+                    if snapshot.execute("PRAGMA integrity_check").fetchone()[0] != "ok" or snapshot.execute("PRAGMA foreign_key_check").fetchall():
+                        raise ArchiveError("archive index pre-migration backup failed verification")
+            con.execute("DROP VIEW IF EXISTS session_catalog")
+            con.execute("ALTER TABLE sessions DROP COLUMN markdown_path")
+            con.commit()
         if legacy and not any(row["name"] == "archive_id" for row in legacy):
             con.executescript(
                 """
@@ -336,7 +348,6 @@ def init_db(root: Path) -> None:
                 source_path TEXT NOT NULL,
                 raw_archive_path TEXT NOT NULL,
                 normalized_path TEXT NOT NULL,
-                markdown_path TEXT NOT NULL,
                 manifest_path TEXT NOT NULL,
                 source_sha256 TEXT NOT NULL,
                 source_size_bytes INTEGER NOT NULL,
@@ -380,7 +391,7 @@ def init_db(root: Path) -> None:
                    (SELECT group_concat(prompt_id, ',')
                     FROM session_prompt_ids p WHERE p.archive_id=s.archive_id) AS normalized_prompt_ids,
                    s.event_count, s.invalid_json_lines, s.source_path,
-                   s.raw_archive_path, s.normalized_path, s.markdown_path,
+                   s.raw_archive_path, s.normalized_path,
                    s.manifest_path, s.imported_at_utc, s.updated_at_utc
             FROM sessions s;
 
@@ -531,35 +542,6 @@ def archive_id_for_path(path: Path) -> str:
     return first_uuid_from_path(path) or hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:32]
 
 
-def markdown_for_session(manifest: dict[str, Any], events: list[dict[str, Any]]) -> str:
-    lines = [
-        f"# Codex Session {manifest['session_id']}",
-        "",
-        f"- status: {manifest['status']}",
-        f"- source_path: {manifest['source_path']}",
-        f"- first_timestamp_utc: {manifest.get('first_timestamp_utc')}",
-        f"- last_timestamp_utc: {manifest.get('last_timestamp_utc')}",
-        f"- cwd: {manifest.get('cwd')}",
-        f"- repo_root: {manifest.get('repo_root')}",
-        f"- prompt_ids: {', '.join(manifest.get('prompt_ids') or [])}",
-        f"- event_count: {manifest.get('event_count')}",
-        "",
-        "## Events",
-        "",
-    ]
-    for event in events:
-        head = f"### {event['event_index']} {event.get('timestamp_utc')} {event.get('top_type')}"
-        if event.get("subtype"):
-            head += f"/{event['subtype']}"
-        if event.get("role"):
-            head += f" role={event['role']}"
-        lines.extend([head, ""])
-        text = event.get("content_text") or ""
-        if text:
-            lines.extend(["```text", text.rstrip(), "```", ""])
-    return "\n".join(lines).rstrip() + "\n"
-
-
 def import_session(root: Path, source_root: Path, path: Path) -> tuple[str, bool, dict[str, Any]]:
     init_db(root)
     archive_id = archive_id_for_path(path)
@@ -576,7 +558,6 @@ def import_session(root: Path, source_root: Path, path: Path) -> tuple[str, bool
         rel = rel_session_path(path, source_root)
         raw_path = root / "raw/sessions" / rel.with_suffix(rel.suffix + ".gz")
         normalized_path = root / "normalized/sessions" / f"{archive_id}.jsonl"
-        markdown_path = root / "markdown/sessions" / f"{archive_id}.md"
         manifest_path = root / "manifests/sessions" / f"{archive_id}.json"
 
         atomic_gzip_copy(snapshot_path, raw_path)
@@ -584,7 +565,6 @@ def import_session(root: Path, source_root: Path, path: Path) -> tuple[str, bool
         raw_size = raw_path.stat().st_size
         normalized_text = "".join(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n" for event in events)
         atomic_write(normalized_path, normalized_text)
-        atomic_write(markdown_path, markdown_for_session(manifest, events))
         manifest.update(
             {
                 "source_sha256": source_sha,
@@ -593,7 +573,6 @@ def import_session(root: Path, source_root: Path, path: Path) -> tuple[str, bool
                 "raw_archive_sha256": raw_sha,
                 "raw_archive_size_bytes": raw_size,
                 "normalized_path": str(normalized_path),
-                "markdown_path": str(markdown_path),
                 "manifest_path": str(manifest_path),
                 "imported_by": f"{APP_NAME} {VERSION}",
                 "updated_at_utc": utc_stamp(),
@@ -612,11 +591,11 @@ def import_session(root: Path, source_root: Path, path: Path) -> tuple[str, bool
             """
             INSERT INTO sessions (
                 archive_id, session_id, first_timestamp_utc, last_timestamp_utc, source_path,
-                raw_archive_path, normalized_path, markdown_path, manifest_path,
+                raw_archive_path, normalized_path, manifest_path,
                 source_sha256, source_size_bytes, raw_archive_size_bytes, raw_archive_sha256,
                 event_count, invalid_json_lines, status, cwd, repo_root, git_branch,
                 git_sha, git_remote, prompt_ids, cli_version, imported_at_utc, updated_at_utc
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(archive_id) DO UPDATE SET
                 first_timestamp_utc=excluded.first_timestamp_utc,
                 last_timestamp_utc=excluded.last_timestamp_utc,
@@ -624,7 +603,6 @@ def import_session(root: Path, source_root: Path, path: Path) -> tuple[str, bool
                 source_path=excluded.source_path,
                 raw_archive_path=excluded.raw_archive_path,
                 normalized_path=excluded.normalized_path,
-                markdown_path=excluded.markdown_path,
                 manifest_path=excluded.manifest_path,
                 source_sha256=excluded.source_sha256,
                 source_size_bytes=excluded.source_size_bytes,
@@ -650,7 +628,6 @@ def import_session(root: Path, source_root: Path, path: Path) -> tuple[str, bool
                 str(path),
                 str(raw_path),
                 str(normalized_path),
-                str(markdown_path),
                 str(manifest_path),
                 source_sha,
                 source_size,
@@ -875,7 +852,7 @@ def command_verify(args: argparse.Namespace) -> int:
             session_rows = con.execute("SELECT * FROM sessions").fetchall()
             source_rows = con.execute("SELECT * FROM source_files").fetchall()
         for row in session_rows:
-            for key in ("raw_archive_path", "normalized_path", "markdown_path", "manifest_path"):
+            for key in ("raw_archive_path", "normalized_path", "manifest_path"):
                 path = Path(row[key])
                 if not path.exists():
                     errors.append(f"missing {key}: {path}")
@@ -938,7 +915,6 @@ def command_export(args: argparse.Namespace) -> int:
             for key, folder in (
                 ("manifest_path", "manifests"),
                 ("normalized_path", "normalized"),
-                ("markdown_path", "markdown"),
                 ("raw_archive_path", "raw"),
             ):
                 path = Path(row[key])
@@ -1209,7 +1185,6 @@ session files from `{DEFAULT_SOURCE_ROOT}` without changing the `codex` command.
 Captured data:
 - exact gzip copies of native rollout JSONL files under `raw/sessions/`;
 - normalized JSONL events under `normalized/sessions/`;
-- Markdown views under `markdown/sessions/`;
 - per-session manifests under `manifests/sessions/`;
 - SQLite index at `index/archive.sqlite`;
 - raw history and session metadata snapshots when available.
