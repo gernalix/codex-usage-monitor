@@ -9,6 +9,7 @@ import unittest
 import zipfile
 
 import codex_session_archive as archive
+from codex_monitor.capsules.session_archive import api as archive_redaction
 
 
 def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
@@ -17,6 +18,16 @@ def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
 
 
 class SessionArchiveTests(unittest.TestCase):
+    def test_free_text_login_urls_are_redacted_before_publication(self) -> None:
+        token = "a" * 64
+        text = "single-use login http://127.0.0.1:8001/-/auth-token?token=" + token
+        saved = archive_redaction.redact_obj({"output": text, "nested": ["https://example.test/login?oobCode=" + token + "&lang=en"]})
+        self.assertNotIn(token, json.dumps(saved))
+        self.assertEqual(saved["output"], "single-use login http://127.0.0.1:8001/-/auth-token?token=[REDACTED]")
+        self.assertIn("&lang=en", saved["nested"][0])
+        self.assertEqual(archive_redaction.redact_obj(saved), saved)
+        self.assertEqual(archive_redaction.redact_text("AIza" + "x" * 35), "[GOOGLE_API_KEY_REDACTED]")
+
     def make_rows(self, session_id: str, *, complete: bool = True) -> list[dict[str, object]]:
         rows: list[dict[str, object]] = [
             {
