@@ -24,6 +24,7 @@ RUNTIME_FILES = (
     "codex_usage_publisher_base.py",
     "codex_usage_publisher_legacy.py",
     "codex_chat_dump_publisher.py",
+    "codex_human_log.py",
     "codex_session_archive.py",
     "github_actions_watch.py",
     "c2_orchestrator.py",

@@ -1,0 +1,17 @@
+[Unit]
+Description=Codex human-readable live log (passive)
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/home/daniele
+LoadCredential=telegram.env:/home/daniele/.config/codex/secrets/telegram.env
+ExecStart=/usr/bin/python3 /home/daniele/.local/lib/codex-usage-monitor/current/codex_human_log.py once --fedora --telegram
+TimeoutStartSec=280
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/home/daniele/.local/state/codex-human-log /home/daniele/.codex
+StandardOutput=journal
+StandardError=journal
