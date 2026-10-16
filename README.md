@@ -74,6 +74,12 @@ SQLite views include:
 
 Fedora System Monitor owns service-level health and Uptime Kuma heartbeats.
 
+## Registro leggibile live delle chat Codex
+
+Il servizio osserva passivamente i JSONL nativi e traduce gli aggiornamenti Codex
+in italiano comprensibile, senza cambiare task o chat. Dettagli e comandi in
+[docs/HUMAN_LOG.md](docs/HUMAN_LOG.md).
+
 ## Fedora native Codex session archive
 
 The passive archive imports files Codex already writes under `~/.codex`; it does not wrap or replace Codex.
