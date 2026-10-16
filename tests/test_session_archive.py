@@ -19,6 +19,18 @@ def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
 
 
 class SessionArchiveTests(unittest.TestCase):
+    def test_quoted_credential_environment_settings_in_search_snippets(self) -> None:
+        token = "x" * 44
+        text = json.dumps({"PLAYWRIGHT_MCP_EXTENSION_TOKEN": token, "ordinary": "keep"})
+        for depth in range(3):
+            with self.subTest(encoding_depth=depth):
+                saved = archive_redaction.redact_text(text)
+                self.assertNotIn(token, saved)
+                self.assertIn("ordinary", saved)
+                self.assertIn("keep", saved)
+                self.assertEqual(archive_redaction.redact_text(saved), saved)
+            text = json.dumps(text)
+
     def test_base64_runner_credential_bundle_is_not_published(self) -> None:
         payload = {".runner": "test runner", ".credentials": "test OAuth metadata",
                    ".credentials_rsaparams": base64.b64encode(json.dumps({"d": "fake private parameter"}).encode()).decode()}
