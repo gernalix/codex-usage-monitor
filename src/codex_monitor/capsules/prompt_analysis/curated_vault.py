@@ -460,7 +460,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    return command_build(build_parser().parse_args())
+    """Retired user-facing entrypoint: never create derived Markdown transcripts.
+
+    Historical parsing/rendering helpers stay importable for archived tests, but
+    native JSONL and the indexed source locators are the sole analysis sources.
+    """
+    print(json.dumps({
+        "status": "retired",
+        "source_of_truth": str(DEFAULT_ARCHIVE_ROOT / "index/archive.sqlite"),
+        "raw_jsonl_root": str(DEFAULT_ARCHIVE_ROOT / "raw/sessions"),
+        "normalized_jsonl_root": str(DEFAULT_ARCHIVE_ROOT / "normalized/sessions"),
+    }, sort_keys=True))
+    return 0
 
 
 if __name__ == "__main__":

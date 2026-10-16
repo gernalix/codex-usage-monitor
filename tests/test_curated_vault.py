@@ -7,6 +7,18 @@ import codex_curated_vault as vault
 
 
 class CuratedVaultTests(unittest.TestCase):
+    def test_public_entrypoint_is_read_only_and_does_not_regenerate_markdown(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        captured = StringIO()
+        with redirect_stdout(captured):
+            self.assertEqual(vault.main(), 0)
+        result = json.loads(captured.getvalue())
+        self.assertEqual(result["status"], "retired")
+        self.assertTrue(result["source_of_truth"].endswith("index/archive.sqlite"))
+        service = Path(__file__).resolve().parents[1] / "systemd/codex-session-archive.service"
+        self.assertNotIn("codex_curated_vault.py", service.read_text())
+
     def test_extracts_links_final_report_and_bottlenecks(self):
         sid = "019fe7aa-38cc-7991-b9bb-07dcdf755ae8"
         events = [
