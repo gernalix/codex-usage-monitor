@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import datetime as dt
 import fcntl
 import gzip
@@ -220,11 +222,27 @@ def snapshot_source(src: Path, temp_parent: Path) -> tuple[Path, str, int]:
         raise
 
 
+ENCODED_JSON_RE = re.compile(r"(?<![A-Za-z0-9+/])ey[A-Za-z0-9+/]{78,}={0,2}(?![A-Za-z0-9+/=])")
+
+
+def redact_runner_bundle(match: re.Match[str]) -> str:
+    encoded = match.group(0)
+    if len(encoded) > 128 * 1024:
+        return encoded
+    try:
+        obj = json.loads(base64.b64decode(encoded, validate=True))
+    except (binascii.Error, ValueError, UnicodeError):
+        return encoded
+    if isinstance(obj, dict) and (".credentials_rsaparams" in obj or ".credentials" in obj):
+        return "[ENCODED_RUNNER_CREDENTIALS_REDACTED]"
+    return encoded
+
+
 def redact_text(value: str) -> str:
     text = value.replace("\x00", " ")
     for pattern, replacement in SENSITIVE_TEXT_PATTERNS:
         text = pattern.sub(replacement, text)
-    return text
+    return ENCODED_JSON_RE.sub(redact_runner_bundle, text)
 
 
 def redact_obj(value: Any, key_hint: str = "") -> Any:
