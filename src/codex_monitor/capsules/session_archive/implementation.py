@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import datetime as dt
 import fcntl
 import gzip
@@ -53,6 +55,8 @@ SENSITIVE_TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # Login URLs occur inside free-form tool output, not only keyed JSON.
     (re.compile(r'''([?&#](?:token|access_token|refresh_token|id_token|session_token|code|oobCode|apiKey|api_key)=)[^\s&#"'<>\\]+''', re.I), r"\1[REDACTED]"),
     (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "[GOOGLE_API_KEY_REDACTED]"),
+    (re.compile(r'''(\b[A-Za-z_]*(?:token|secret|password|api_key)\\*["']\s*:\s*\\*["'])[A-Za-z0-9._~+/=-]{16,}(\\*["'])''', re.I), r"\1[REDACTED]\2"),
+    (re.compile(r'''(\b(?:[A-Za-z_]*(?:token|secret|password|api_key)|token|secret|password)\s*[:=]\s*)["']?[A-Za-z0-9._~+/=-]{16,}["']?''', re.I), r"\1[REDACTED]"),
     (re.compile(r"\bgAAAAA[A-Za-z0-9_-]{80,}={0,2}\b"), "[ENCRYPTED_CONTENT_OMITTED_FROM_NORMALIZED_RAW_AVAILABLE]"),
     (re.compile(r"(api\.telegram\.org/bot)[^/\s]+"), r"\1[REDACTED]"),
     (re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b"), "[TELEGRAM_TOKEN_REDACTED]"),
@@ -219,11 +223,27 @@ def snapshot_source(src: Path, temp_parent: Path) -> tuple[Path, str, int]:
         raise
 
 
+ENCODED_JSON_RE = re.compile(r"(?<![A-Za-z0-9+/])ey[A-Za-z0-9+/]{78,}={0,2}(?![A-Za-z0-9+/=])")
+
+
+def redact_runner_bundle(match: re.Match[str]) -> str:
+    encoded = match.group(0)
+    if len(encoded) > 128 * 1024:
+        return encoded
+    try:
+        obj = json.loads(base64.b64decode(encoded, validate=True))
+    except (binascii.Error, ValueError, UnicodeError):
+        return encoded
+    if isinstance(obj, dict) and (".credentials_rsaparams" in obj or ".credentials" in obj):
+        return "[ENCODED_RUNNER_CREDENTIALS_REDACTED]"
+    return encoded
+
+
 def redact_text(value: str) -> str:
     text = value.replace("\x00", " ")
     for pattern, replacement in SENSITIVE_TEXT_PATTERNS:
         text = pattern.sub(replacement, text)
-    return text
+    return ENCODED_JSON_RE.sub(redact_runner_bundle, text)
 
 
 def redact_obj(value: Any, key_hint: str = "") -> Any:

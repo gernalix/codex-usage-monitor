@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import base64
 import json
 import sqlite3
 import tempfile
@@ -18,6 +19,28 @@ def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
 
 
 class SessionArchiveTests(unittest.TestCase):
+    def test_quoted_credential_environment_settings_in_search_snippets(self) -> None:
+        token = "x" * 44
+        text = json.dumps({"PLAYWRIGHT_MCP_EXTENSION_TOKEN": token, "ordinary": "keep"})
+        for depth in range(3):
+            with self.subTest(encoding_depth=depth):
+                saved = archive_redaction.redact_text(text)
+                self.assertNotIn(token, saved)
+                self.assertIn("ordinary", saved)
+                self.assertIn("keep", saved)
+                self.assertEqual(archive_redaction.redact_text(saved), saved)
+            text = json.dumps(text)
+
+    def test_base64_runner_credential_bundle_is_not_published(self) -> None:
+        payload = {".runner": "test runner", ".credentials": "test OAuth metadata",
+                   ".credentials_rsaparams": base64.b64encode(json.dumps({"d": "fake private parameter"}).encode()).decode()}
+        encoded = base64.b64encode(json.dumps(payload).encode()).decode()
+        saved = archive_redaction.redact_obj({"output": "restore runner " + encoded})
+        self.assertNotIn(encoded, json.dumps(saved))
+        self.assertEqual(saved["output"], "restore runner [ENCODED_RUNNER_CREDENTIALS_REDACTED]")
+        ordinary = base64.b64encode(json.dumps({"manifest": ["ordinary/file"] * 10}).encode()).decode()
+        self.assertEqual(archive_redaction.redact_text(ordinary), ordinary)
+
     def test_free_text_login_urls_are_redacted_before_publication(self) -> None:
         token = "a" * 64
         text = "single-use login http://127.0.0.1:8001/-/auth-token?token=" + token
@@ -27,6 +50,8 @@ class SessionArchiveTests(unittest.TestCase):
         self.assertIn("&lang=en", saved["nested"][0])
         self.assertEqual(archive_redaction.redact_obj(saved), saved)
         self.assertEqual(archive_redaction.redact_text("AIza" + "x" * 35), "[GOOGLE_API_KEY_REDACTED]")
+        self.assertEqual(archive_redaction.redact_text("token = " + "x" * 30), "token = [REDACTED]")
+        self.assertEqual(archive_redaction.redact_text('MEMENTO_TOKEN="' + "x" * 30 + '"'), "MEMENTO_TOKEN=[REDACTED]")
 
     def make_rows(self, session_id: str, *, complete: bool = True) -> list[dict[str, object]]:
         rows: list[dict[str, object]] = [
