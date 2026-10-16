@@ -53,6 +53,7 @@ SENSITIVE_TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # Login URLs occur inside free-form tool output, not only keyed JSON.
     (re.compile(r'''([?&#](?:token|access_token|refresh_token|id_token|session_token|code|oobCode|apiKey|api_key)=)[^\s&#"'<>\\]+''', re.I), r"\1[REDACTED]"),
     (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "[GOOGLE_API_KEY_REDACTED]"),
+    (re.compile(r'''(\b(?:[A-Za-z_]*(?:token|secret|password|api_key)|token|secret|password)\s*[:=]\s*)["']?[A-Za-z0-9._~+/=-]{16,}["']?''', re.I), r"\1[REDACTED]"),
     (re.compile(r"\bgAAAAA[A-Za-z0-9_-]{80,}={0,2}\b"), "[ENCRYPTED_CONTENT_OMITTED_FROM_NORMALIZED_RAW_AVAILABLE]"),
     (re.compile(r"(api\.telegram\.org/bot)[^/\s]+"), r"\1[REDACTED]"),
     (re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b"), "[TELEGRAM_TOKEN_REDACTED]"),

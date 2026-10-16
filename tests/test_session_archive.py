@@ -27,6 +27,8 @@ class SessionArchiveTests(unittest.TestCase):
         self.assertIn("&lang=en", saved["nested"][0])
         self.assertEqual(archive_redaction.redact_obj(saved), saved)
         self.assertEqual(archive_redaction.redact_text("AIza" + "x" * 35), "[GOOGLE_API_KEY_REDACTED]")
+        self.assertEqual(archive_redaction.redact_text("token = " + "x" * 30), "token = [REDACTED]")
+        self.assertEqual(archive_redaction.redact_text('MEMENTO_TOKEN="' + "x" * 30 + '"'), "MEMENTO_TOKEN=[REDACTED]")
 
     def make_rows(self, session_id: str, *, complete: bool = True) -> list[dict[str, object]]:
         rows: list[dict[str, object]] = [
