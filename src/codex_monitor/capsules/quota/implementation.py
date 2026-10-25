@@ -13,6 +13,7 @@ import logging
 import os
 from pathlib import Path
 from codex_monitor.credentials import credential_path
+from .attribution import attribution_lines, build_attribution, store_attribution
 import re
 import secrets
 import shutil
@@ -836,6 +837,13 @@ def init_db(cfg: Config) -> None:
             CREATE INDEX IF NOT EXISTS idx_rate_limit_snapshots_snapshot ON rate_limit_snapshots(snapshot_id);
             CREATE INDEX IF NOT EXISTS idx_rate_limit_snapshots_limit_time ON rate_limit_snapshots(limit_id, reset_at_utc);
 
+            CREATE TABLE IF NOT EXISTS quota_attributions (
+                snapshot_id INTEGER PRIMARY KEY REFERENCES quota_snapshots(snapshot_id) ON DELETE CASCADE,
+                previous_snapshot_id INTEGER NOT NULL REFERENCES quota_snapshots(snapshot_id),
+                diagnostic_json TEXT NOT NULL,
+                created_at_utc TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS notification_events (
                 notification_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 snapshot_id INTEGER REFERENCES quota_snapshots(snapshot_id),
@@ -1397,7 +1405,7 @@ def build_notification_events(cfg: Config, con: sqlite3.Connection, snapshot_id:
                     quota_state_event_key(current_state),
                     "quota_change",
                     "Codex weekly quota changed",
-                    "\n".join(quota_change_message_lines(previous_state, current)),
+                    "\n".join(quota_change_message_lines(previous_state, current) + attribution_lines(con, snapshot_id)),
                 )
             )
     reset_raw = current["weekly_reset_at_utc"]
@@ -1573,8 +1581,18 @@ def command_once(args: argparse.Namespace) -> int:
             status = "ok" if all(value is not None for value in required_values) else "partial"
             snapshot_id = insert_snapshot(con, run_id, status, reading)
             finish_run(con, run_id, status)
+            attribution_status = "not_applicable"
+            if status == "ok":
+                try:
+                    report = build_attribution(con, snapshot_id)
+                    if report:
+                        store_attribution(con, report)
+                        attribution_status = report["status"]
+                except (OSError, ValueError, sqlite3.DatabaseError) as exc:
+                    attribution_status = "error"
+                    logging.warning("Quota attribution unavailable: %s", sanitize(exc, 160))
             dispatch_notifications(cfg, con, snapshot_id, dry_run=args.dry_run_notifications)
-            print(json.dumps({"snapshot_id": snapshot_id, "status": status, "weekly_used_percent": reading.weekly_used_percent, "weekly_reset_at_utc": reading.weekly_reset_at_utc, "usage_limit_resets_available": reading.usage_limit_resets_available}, sort_keys=True))
+            print(json.dumps({"snapshot_id": snapshot_id, "status": status, "attribution": attribution_status, "weekly_used_percent": reading.weekly_used_percent, "weekly_reset_at_utc": reading.weekly_reset_at_utc, "usage_limit_resets_available": reading.usage_limit_resets_available}, sort_keys=True))
             return 0 if status == "ok" else 1
         except Exception as exc:
             error = sanitize(exc, 700)
@@ -1701,6 +1719,30 @@ def command_init_db(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_explain_quota(args: argparse.Namespace) -> int:
+    cfg = build_config(args)
+    init_db(cfg)
+    with connect_db(cfg) as con:
+        snapshot_id = args.snapshot_id
+        if snapshot_id is None:
+            row = con.execute("SELECT snapshot_id FROM quota_attributions ORDER BY snapshot_id DESC LIMIT 1").fetchone()
+            snapshot_id = int(row[0]) if row else None
+        if args.refresh:
+            if snapshot_id is None:
+                row = con.execute("SELECT snapshot_id FROM quota_snapshots WHERE acquisition_status='ok' ORDER BY snapshot_id DESC LIMIT 1").fetchone()
+                snapshot_id = int(row[0]) if row else None
+            if snapshot_id is not None:
+                report = build_attribution(con, snapshot_id)
+                if report:
+                    store_attribution(con, report)
+        row = con.execute("SELECT diagnostic_json FROM quota_attributions WHERE snapshot_id=?", (snapshot_id,)).fetchone()
+        if not row:
+            print(json.dumps({"status": "no_quota_increase_recorded", "snapshot_id": snapshot_id}, sort_keys=True))
+            return 1
+        print(row["diagnostic_json"])
+        return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Codex usage monitor backed only by SQLite")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1713,6 +1755,10 @@ def build_parser() -> argparse.ArgumentParser:
     migrate.set_defaults(func=command_migrate)
     sub.add_parser("init-db", help="Create or upgrade the SQLite schema").set_defaults(func=command_init_db)
     sub.add_parser("status", help="Print latest SQLite state as JSON").set_defaults(func=command_status)
+    explain = sub.add_parser("explain-quota", help="Attribute the most recent quota drop to native Codex sessions")
+    explain.add_argument("--snapshot-id", type=int)
+    explain.add_argument("--refresh", action="store_true", help="Recompute from original session JSONL")
+    explain.set_defaults(func=command_explain_quota)
     notify = sub.add_parser("notify-test", help="Send one explicit Telegram TEST notification")
     notify.add_argument("--dry-run", action="store_true")
     notify.set_defaults(func=command_notify_test)
