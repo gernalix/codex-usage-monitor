@@ -35,7 +35,7 @@ Native Codex sessions:
 ### Fedora services
 
 - `codex-usage-monitor.timer` → quota acquisition every 15 minutes.
-- `codex-session-archive.timer` → passive local archive/index updates.
+- `codex-session-archive.timer` → passive local archive/index updates every 5 minutes (calendar-based: survives restarts without an elapsed timer).
 - `codex-usage-publisher.timer` → usage/prompt/chat publication and complete redacted native chat dumps.
 
 The quota-monitor service receives `codex-usage-monitor.env` and the shared
