@@ -6,7 +6,8 @@ After=graphical-session.target
 Type=oneshot
 Environment=PYTHONUNBUFFERED=1
 WorkingDirectory=/home/daniele
-LoadCredential=telegram.env:/home/daniele/.config/codex/secrets/telegram.env
+ExecStartPre=/home/daniele/.local/bin/bws-credential --ref FEDORA_TELEGRAM_ENV --var TELEGRAM_BOT_TOKEN --var TELEGRAM_CHAT_ID --var TELEGRAM_INSERT_BOT_NOISY_BOT_TOKEN --var TELEGRAM_INSERT_BOT_NOISY_CHAT_ID --write-env
+EnvironmentFile=-%t/bitwarden-env/FEDORA_TELEGRAM_ENV--37f94f7e982d.env
 ExecStart=/usr/bin/python3 /home/daniele/.local/lib/codex-usage-monitor/current/codex_human_log.py once --fedora --telegram
 TimeoutStartSec=280
 NoNewPrivileges=true
