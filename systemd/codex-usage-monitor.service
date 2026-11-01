@@ -10,7 +10,8 @@ Environment=PYTHONUNBUFFERED=1
 Environment=CODEX_USAGE_DB=/home/daniele/.local/share/codex-usage-monitor/codex_usage_monitor.db
 Environment=CODEX_USAGE_STATE_DIR=/home/daniele/.local/state/codex-usage-monitor
 LoadCredential=codex-usage-monitor.env:/home/daniele/.config/codex-usage-monitor/codex-usage-monitor.env
-LoadCredential=telegram.env:/home/daniele/.config/codex/secrets/telegram.env
+ExecStartPre=/home/daniele/.local/bin/bws-credential --ref FEDORA_TELEGRAM_ENV --var TELEGRAM_BOT_TOKEN --var TELEGRAM_CHAT_ID --var TELEGRAM_INSERT_BOT_NOISY_BOT_TOKEN --var TELEGRAM_INSERT_BOT_NOISY_CHAT_ID --write-env
+EnvironmentFile=-%t/bitwarden-env/FEDORA_TELEGRAM_ENV--37f94f7e982d.env
 ExecStart=/usr/bin/python3 /home/daniele/projects/codex-usage-monitor/codex_usage_monitor.py once
 TimeoutStartSec=180
 NoNewPrivileges=true

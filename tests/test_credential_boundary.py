@@ -28,7 +28,7 @@ class CredentialBoundaryTests(unittest.TestCase):
                     credential_path("telegram.env", "/legacy/telegram.env"),
                 )
 
-    def test_monitor_unit_uses_loadcredential_not_environmentfile(self) -> None:
+    def test_monitor_unit_uses_native_config_and_vault_telegram(self) -> None:
         unit = (
             Path(__file__).resolve().parents[1]
             / "systemd"
@@ -38,12 +38,16 @@ class CredentialBoundaryTests(unittest.TestCase):
             "LoadCredential=codex-usage-monitor.env:/home/daniele/.config/codex-usage-monitor/codex-usage-monitor.env",
             unit,
         )
-        self.assertIn(
-            "LoadCredential=telegram.env:/home/daniele/.config/codex/secrets/telegram.env",
-            unit,
-        )
-        self.assertNotIn("EnvironmentFile=", unit)
+        self.assertNotIn("LoadCredential=telegram.env:", unit)
+        self.assertIn("ExecStartPre=/home/daniele/.local/bin/bws-credential --ref FEDORA_TELEGRAM_ENV", unit)
+        self.assertIn("EnvironmentFile=-%t/bitwarden-env/FEDORA_TELEGRAM_ENV--37f94f7e982d.env", unit)
         self.assertNotIn("Environment=TELEGRAM_NOTIFY_CONFIG=", unit)
+
+    def test_human_log_unit_uses_vault_telegram(self) -> None:
+        unit = (Path(__file__).resolve().parents[1] / "systemd" / "codex-human-log.service").read_text()
+        self.assertNotIn("LoadCredential=telegram.env:", unit)
+        self.assertIn("ExecStartPre=/home/daniele/.local/bin/bws-credential --ref FEDORA_TELEGRAM_ENV", unit)
+        self.assertIn("EnvironmentFile=-%t/bitwarden-env/FEDORA_TELEGRAM_ENV--37f94f7e982d.env", unit)
 
 
 if __name__ == "__main__":
