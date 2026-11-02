@@ -18,6 +18,20 @@ def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
 
+class AssertionRedactionTests(unittest.TestCase):
+    def test_assertion_and_unittest_diff_hide_high_entropy_value(self):
+        candidate = "a1b2" * 10
+        output = f"AssertionError: '{candidate}' != 'fixture'\n- {candidate}\n+ fixture\n"
+        saved = archive_redaction.redact_text(output)
+        self.assertNotIn(candidate, saved)
+        self.assertEqual(saved.count("[ASSERTION_VALUE_REDACTED]"), 2)
+        self.assertEqual(archive_redaction.redact_text(saved), saved)
+
+    def test_normal_commit_hash_and_short_assertion_are_preserved(self):
+        text = "commit " + "a1b2" * 10 + "\nAssertionError: 'a' != 'b'\n"
+        self.assertEqual(archive_redaction.redact_text(text), text)
+
+
 class SessionArchiveTests(unittest.TestCase):
     def test_quoted_credential_environment_settings_in_search_snippets(self) -> None:
         token = "x" * 44
