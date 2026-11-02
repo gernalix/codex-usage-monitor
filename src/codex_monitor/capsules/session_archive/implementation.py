@@ -241,6 +241,12 @@ def redact_runner_bundle(match: re.Match[str]) -> str:
 
 def redact_text(value: str) -> str:
     text = value.replace("\x00", " ")
+    # unittest can leak a resolved credential in both its assertion and diff.
+    # Keep ordinary hashes outside assertion failures intact; never require a
+    # vault lookup or a list of live secret values to redact this failure form.
+    for failure in re.findall(r"(?m)^AssertionError: (.+)$", text):
+        for _, literal in re.findall(r"([\"'])([A-Za-z0-9._~+/=-]{16,})\1", failure):
+            text = text.replace(literal, "[ASSERTION_VALUE_REDACTED]")
     for pattern, replacement in SENSITIVE_TEXT_PATTERNS:
         text = pattern.sub(replacement, text)
     return ENCODED_JSON_RE.sub(redact_runner_bundle, text)
