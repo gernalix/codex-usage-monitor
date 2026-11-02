@@ -1,0 +1,169 @@
+schema_version: c2.project-capsule.v1
+identity:
+  project_id: 8
+  slug: codex-usage-monitor
+  repository_id: R0008
+scope:
+  purpose: Collect Fedora-local Codex quota and session usage, preserve private archives,
+    and publish redacted telemetry.
+  boundaries:
+  - No duplicate Oracle collector.
+  - Git synchronization and host health belong to their separate projects.
+  - Historical C2/C3 orchestration remains retired.
+repository:
+  canonical_workdir: /home/daniele/projects/codex-usage-monitor
+  branch_policy: Use isolated task worktrees and the installed single writer; integrate
+    through the protected main pipeline.
+architecture:
+  summary: Public APIs separate quota, session archive, prompt analysis, publishing,
+    source registry and runtime deployment; AST checks enforce import and adapter
+    boundaries.
+  entrypoints:
+  - codex_usage_monitor.py
+  - codex_session_archive.py
+  - codex_usage_publisher.py
+  - codex_human_log.py
+  important_paths:
+  - src/codex_monitor/capsules
+  - src/codex_monitor/credentials.py
+  - scripts/verify_repo.py
+  - scripts/check_architecture_boundaries.py
+  - systemd
+  - tests
+dependencies:
+- name: Python standard library
+  purpose: Runtime, SQLite, JSON, archival and unit tests.
+- name: Local Codex app-server
+  purpose: Quota acquisition on the Fedora host.
+- name: systemd user services
+  purpose: Installed runtime scheduling; never activated by capsule verification.
+data:
+  schema: See docs/data-model.md and owning quota/archive modules; databases and raw
+    rollouts remain outside Git.
+  migrations: Use owning application schema/migrations with consistent SQLite backup;
+    never byte-merge a live database.
+runtime:
+  services:
+  - codex-usage-monitor.service
+  - codex-session-archive.service
+  - codex-usage-publisher.service
+  - codex-human-log.service
+  timers:
+  - codex-usage-monitor.timer
+  - codex-session-archive.timer
+  - codex-usage-publisher.timer
+  - codex-human-log.timer
+  containers: []
+devices: []
+commands:
+  setup:
+    not_applicable: Python stdlib runtime; host provisioning and credential migration
+      are separate operations.
+  build:
+    not_applicable: No compiled build.
+  test_targeted:
+    argv:
+    - python3
+    - -B
+    - scripts/verify_repo.py
+    - tests.test_quota_schema_capsule
+    - tests.test_credential_boundary
+    cwd: .
+  test_full:
+    argv:
+    - python3
+    - -B
+    - scripts/verify_repo.py
+    cwd: .
+  lint:
+    argv:
+    - python3
+    - -B
+    - scripts/check_architecture_boundaries.py
+    cwd: .
+  deploy_install:
+    argv:
+    - python3
+    - deploy_runtime.py
+    cwd: .
+  smoke:
+    not_applicable: Live collection, publication and notification require a separate
+      operational check.
+  verify:
+    fast:
+      argv:
+      - python3
+      - /home/daniele/projects/codex-roadmap/tools/project_capsule.py
+      - --repo
+      - .
+      - --mode
+      - FAST
+      cwd: .
+    full:
+      argv:
+      - python3
+      - /home/daniele/projects/codex-roadmap/tools/project_capsule.py
+      - --repo
+      - .
+      - --mode
+      - FULL
+      cwd: .
+safety:
+  invariants:
+  - Never publish raw sessions, auth state, credentials or live databases.
+  - Preserve native sessions and all valid archive/index history.
+  - No notifications or service mutations in verification.
+  risky_operations:
+  - Deployment, collectors, publishers, notification tests, credential cutovers and
+    data rebuilds change runtime or external state.
+  recovery:
+  - Use protected Git history for source; private consistent backups and owning migration
+    tools for runtime data.
+acceptance:
+- Identity matches MegaVault R0008/project 8.
+- FAST validates manifest and freshness; FULL runs architecture and the existing deterministic
+  suite.
+- Runtime deployment remains a separate verified operation.
+references:
+  megavault: /home/daniele/MegaVault/megavault.sqlite
+  c2: 'Historical-only reference: /home/daniele/projects/codex-roadmap/roadmap.sqlite;
+    no lifecycle writes.'
+freshness:
+  reviewed_commit: 711a05d1df364bcf1e9c7e280b7cc961ee7f1618
+  watch_paths:
+  - src
+  - systemd
+  - scripts
+  - pyproject.toml
+  - .github/workflows
+  - codex_human_log.py
+artifacts:
+  agents: AGENTS.md
+  architecture: docs/architecture.md
+  operations: docs/operations.md
+  data_model: docs/data-model.md
+validation_hooks:
+- id: deterministic-suite
+  argv:
+  - python3
+  - -B
+  - scripts/verify_repo.py
+  cwd: .
+  safe: true
+change_verification:
+- paths:
+  - project-capsule.yaml
+  - AGENTS.md
+  - docs/*
+  commands:
+  - lint
+- paths:
+  - src/*
+  - tests/*
+  - scripts/*
+  - systemd/*
+  - '*.py'
+  - .github/*
+  - pyproject.toml
+  commands:
+  - test_full
