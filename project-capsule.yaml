@@ -113,6 +113,8 @@ safety:
   - Never publish raw sessions, auth state, credentials or live databases.
   - Preserve native sessions and all valid archive/index history.
   - No notifications or service mutations in verification.
+  - Redacted archives must hide credential-like unittest assertion values and their
+    repeated diff lines; exact raw originals remain private.
   risky_operations:
   - Deployment, collectors, publishers, notification tests, credential cutovers and
     data rebuilds change runtime or external state.
@@ -129,7 +131,7 @@ references:
   c2: 'Historical-only reference: /home/daniele/projects/codex-roadmap/roadmap.sqlite;
     no lifecycle writes.'
 freshness:
-  reviewed_commit: 711a05d1df364bcf1e9c7e280b7cc961ee7f1618
+  reviewed_commit: 67887fe773f4106099646317b608aafcc881d173
   watch_paths:
   - src
   - systemd
