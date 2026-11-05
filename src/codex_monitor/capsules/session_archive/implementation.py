@@ -52,6 +52,14 @@ SENSITIVE_KEY_RE = re.compile(
     re.I,
 )
 SENSITIVE_TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # Shell transcripts can contain OAuth codes and short pairing PINs. Match
+    # complete flag names, also through JSON-escaped quotes, without hiding
+    # ordinary --code-file/--token-count arguments or unrelated source code.
+    (re.compile(r'''((?<![\w-])--(?:code|pin|password|passwd|token|api[-_]?key|secret|cookie|authorization|credential)(?:=|[ \t]+))(\\*["'])(.*?)\2''', re.I), r"\1\2[REDACTED]\2"),
+    (re.compile(r'''((?<![\w-])--(?:code|pin|password|passwd|token|api[-_]?key|secret|cookie|authorization|credential)(?:=|[ \t]+)(?:\\*["'])?)(?!-)[^\s"'\\;&|<>]+''', re.I), r"\1[REDACTED]"),
+    (re.compile(r"(\badb\s+pair\s+\S+\s+)\d{6}\b", re.I), r"\1[REDACTED]"),
+    (re.compile(r"\b4/0A[A-Za-z0-9_-]{20,}"), "[GOOGLE_OAUTH_CODE_REDACTED]"),
+    (re.compile(r"\bya29\.[A-Za-z0-9._~-]{15,}"), "[GOOGLE_ACCESS_TOKEN_REDACTED]"),
     # Login URLs occur inside free-form tool output, not only keyed JSON.
     (re.compile(r'''([?&#](?:token|access_token|refresh_token|id_token|session_token|code|oobCode|apiKey|api_key)=)[^\s&#"'<>\\]+''', re.I), r"\1[REDACTED]"),
     (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "[GOOGLE_API_KEY_REDACTED]"),
