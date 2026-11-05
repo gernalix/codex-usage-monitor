@@ -105,6 +105,12 @@ The archive stores exact gzip copies of native rollout JSONL files, normalized J
 
 Normalized files apply best-effort secret redaction. Exact raw copies remain local with restrictive permissions and are not published to GitHub.
 
+The shared redactor also masks authentication command arguments (including
+OAuth `--code` and pairing PINs), Google OAuth codes and access tokens, and
+JSON-escaped shell transcripts. A new rule protects future processing; it does
+not rewrite already published chunks or Git history. Existing derived data
+requires a scoped repair under the publisher lock, preserving private originals.
+
 The timer hot path is incremental. `codex_session_archive_incremental.py` compares current rollout size with `source_size_bytes` already stored in `archive.sqlite`; unchanged append-only files are not reopened, copied or hashed. The full `codex_session_archive.py import` remains the explicit fallback/rebuild path.
 
 ## Per-session and per-prompt cost metrics

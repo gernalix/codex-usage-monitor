@@ -33,6 +33,45 @@ class AssertionRedactionTests(unittest.TestCase):
 
 
 class SessionArchiveTests(unittest.TestCase):
+    def test_shell_authentication_arguments_and_nested_json_are_redacted(self) -> None:
+        candidate = "synthetic-auth-value-1234567890"
+        for flag in ("code", "pin", "password", "passwd", "token", "api-key", "api_key",
+                     "secret", "cookie", "authorization", "credential"):
+            for argument in (f"--{flag}={candidate}", f"--{flag} {candidate}",
+                             f'--{flag}="{candidate}"', f"--{flag} '{candidate}'"):
+                text = "start-host " + argument + " --redirect-url=https://example.test --name=desktop"
+                for depth in range(3):
+                    with self.subTest(flag=flag, argument=argument, encoding_depth=depth):
+                        saved = archive_redaction.redact_text(text)
+                        self.assertNotIn(candidate, saved)
+                        self.assertIn("--redirect-url=https://example.test --name=desktop", saved)
+                        self.assertEqual(archive_redaction.redact_text(saved), saved)
+                    text = json.dumps(text)
+        self.assertEqual(archive_redaction.redact_text("command --pin 123456 --name=desktop"),
+                         "command --pin [REDACTED] --name=desktop")
+        for quote in ("'", '"'):
+            text = "command --password=" + quote + "synthetic multi word value" + quote + " --name=desktop"
+            for depth in range(3):
+                with self.subTest(quote=quote, encoding_depth=depth):
+                    saved = archive_redaction.redact_text(text)
+                    self.assertNotIn("synthetic", saved)
+                    self.assertNotIn("multi word value", saved)
+                    self.assertIn("--name=desktop", saved)
+                    self.assertEqual(archive_redaction.redact_text(saved), saved)
+                text = json.dumps(text)
+        self.assertEqual(archive_redaction.redact_text("adb pair 192.0.2.1:12345 123456"),
+                         "adb pair 192.0.2.1:12345 [REDACTED]")
+
+    def test_google_oauth_values_are_redacted_without_surrounding_command(self) -> None:
+        for candidate in ("4/0A" + "x" * 40, "ya29." + "x" * 40):
+            saved = archive_redaction.redact_obj({"output": candidate, "nested": ["value " + candidate]})
+            self.assertNotIn(candidate, json.dumps(saved))
+            self.assertEqual(archive_redaction.redact_obj(saved), saved)
+
+    def test_non_authentication_shell_arguments_are_preserved(self) -> None:
+        text = "compile --code-file example.py --token-count 32 --pin-mode input --name desktop"
+        self.assertEqual(archive_redaction.redact_text(text), text)
+
     def test_quoted_credential_environment_settings_in_search_snippets(self) -> None:
         token = "x" * 44
         text = json.dumps({"PLAYWRIGHT_MCP_EXTENSION_TOKEN": token, "ordinary": "keep"})
