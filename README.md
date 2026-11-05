@@ -151,6 +151,8 @@ Publisher invocations share one filesystem lock. `run` waits up to 30 seconds by
 
 The source fast-path is append-aware. If a live Codex rollout only grows with non-terminal reasoning/tool/token events, the publisher inspects just the appended bytes, advances its source snapshot and returns `status=noop_unchanged_sources` without reparsing historical sessions. A new `task_complete`/`turn_aborted`, file replacement/truncation, generation change or pending unpublished state still forces the full parser. This prevents an active Codex conversation from invalidating the fast-path on every tool round-trip.
 
+Repository ownership lookup is memoized by exact path only while parsing one rollout. Repeated historical cycles reuse that lookup; the next parse resolves paths again, including paths previously outside Git or inside a different repository. No persistent repository cache is introduced.
+
 ## Complete redacted chat dumps
 
 `codex_chat_dump_publisher.py` incrementally mirrors native Codex rollout records to the private `gernalix/codex-usage` repository for remote inspection without manual copy/paste.
