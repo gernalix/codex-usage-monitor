@@ -52,6 +52,12 @@ This repository owns Codex session/archive, tokens, costs and usage telemetry on
 
 ## Quota monitor
 
+Quota acquisition owns a child `codex app-server --listen stdio://` and uses
+private JSONL pipes, with initialization, bounded responses, deadlines and child
+cleanup. It never reuses a loopback listener. `CODEX_USAGE_APP_SERVER_PORT` and
+legacy transport classes remain compatibility names; collection does not use
+that port. Sign-in and provider configuration stay unchanged.
+
 The monitor reads the Codex app-server JSON-RPC method `account/rateLimits/read`, stores append-only observations in SQLite, and can send deduplicated Telegram notifications. Individual reset credits (ID, status, grant and expiry timestamps, type and title) are stored in `quota_snapshots.reset_credits_json`. Status and quota notifications show each available free reset’s expiry in Europe/Copenhagen time, earliest first. Existing snapshots fall back to their stored source payload; missing expiry timestamps are shown as unavailable.
 
 Commands:
@@ -110,6 +116,11 @@ OAuth `--code` and pairing PINs), Google OAuth codes and access tokens, and
 JSON-escaped shell transcripts. A new rule protects future processing; it does
 not rewrite already published chunks or Git history. Existing derived data
 requires a scoped repair under the publisher lock, preserving private originals.
+
+Standard authentication headers and credential assignments are covered too.
+Ambiguous credential-bearing text, including quoted/multiline values, is omitted
+in full rather than keeping a possible secret suffix. The human-readable log
+uses this same redactor before its additional presentation filters.
 
 The timer hot path is incremental. `codex_session_archive_incremental.py` compares current rollout size with `source_size_bytes` already stored in `archive.sqlite`; unchanged append-only files are not reopened, copied or hashed. The full `codex_session_archive.py import` remains the explicit fallback/rebuild path.
 
@@ -194,6 +205,12 @@ Default output:
 `~/.local/share/codex-session-archive/exports/codex-usage-diagnostic-bundle-YYYYMMDDTHHMMSSZ.zip`
 
 The bundle contains the usage databases/CSVs, redacted normalized session JSONL, per-session manifests and archive metadata. Raw rollouts, raw gzip archives, native Codex auth/state databases, shell snapshots, locks and secrets are excluded.
+
+Database copies are consistent SQLite snapshots with text-cell redaction, opaque
+binary values omitted, and free pages removed before packaging. This includes
+historical rows; originals are untouched. Schema/constraint failure aborts export
+rather than including an unsanitized copy. Review before sharing: heuristics
+cannot recognize arbitrary sensitive prose. Existing publication is not rewritten.
 
 ## Repository verification
 

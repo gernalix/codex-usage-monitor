@@ -307,8 +307,9 @@ class UsagePublisherTests(unittest.TestCase):
                 publisher, "parse_session", side_effect=AssertionError("nonterminal append was reparsed")
             ), mock.patch.object(
                 publisher, "ensure_repo", side_effect=AssertionError("fast path touched data repo")
-            ):
+            ), mock.patch.object(publisher, "assert_private_repo") as privacy:
                 self.assertEqual(publisher.main(argv), 0)
+            privacy.assert_called_once()
 
     def test_publisher_telemetry_never_sends_telegram(self) -> None:
         normal_cycle = {"metrics": {"chat_id": 178, "prompt_id": "417826", "cycle_key": "normal"}}

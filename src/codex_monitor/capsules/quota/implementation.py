@@ -22,6 +22,7 @@ from .presentation import (
 )
 import re
 import secrets
+import selectors
 import shutil
 import socket
 import sqlite3
@@ -252,33 +253,100 @@ def http_ready(port: int, timeout: float = 2.0) -> bool:
 class AppServerManager:
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.process: subprocess.Popen[str] | None = None
+        self.process: subprocess.Popen[bytes] | None = None
 
     def ensure_ready(self) -> None:
-        if http_ready(self.cfg.app_server_port):
-            return
-        codex_bin = shutil.which(self.cfg.codex_bin) or self.cfg.codex_bin
-        args = [codex_bin, "app-server", "--listen", f"ws://127.0.0.1:{self.cfg.app_server_port}"]
-        self.process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
-        deadline = time.monotonic() + self.cfg.startup_timeout_sec
-        while time.monotonic() < deadline:
-            if http_ready(self.cfg.app_server_port):
+        # Never reuse an unauthenticated loopback listener. The pipes belong to
+        # this child, so a different local UID cannot substitute quota replies.
+        if self.process is not None:
+            if self.process.poll() is None:
                 return
-            if self.process.poll() is not None:
-                raise SourceError(f"Codex app-server exited with status {self.process.returncode}")
-            time.sleep(0.5)
-        raise SourceError(f"Codex app-server did not become ready on port {self.cfg.app_server_port}")
+            raise SourceError("owned Codex app-server already exited")
+        codex_bin = shutil.which(self.cfg.codex_bin) or self.cfg.codex_bin
+        args = [codex_bin, "app-server", "--listen", "stdio://"]
+        self.process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, bufsize=0)
 
     def stop(self) -> None:
         if not self.process:
             return
-        if self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=5)
+        try:
+            if self.process.poll() is None:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait(timeout=5)
+            else:
+                self.process.wait()
+        finally:
+            for stream in (self.process.stdin, self.process.stdout):
+                if stream:
+                    stream.close()
+
+
+class StdioClient:
+    """Bounded JSONL transport over an owned child's private pipes."""
+    MAX_MESSAGE_BYTES = 4 * 1024 * 1024
+
+    def __init__(self, process: subprocess.Popen[bytes], timeout: float):
+        self.process = process
+        self.timeout = timeout
+        self.buffer = b""
+        self.selector: selectors.BaseSelector | None = None
+
+    def __enter__(self) -> "StdioClient":
+        if self.process.stdout is None or self.process.stdin is None:
+            raise SourceError("Codex app-server pipes unavailable")
+        self.selector = selectors.DefaultSelector()
+        try:
+            self.selector.register(self.process.stdout, selectors.EVENT_READ)
+        except Exception:
+            self.selector.close()
+            raise
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        if self.selector:
+            self.selector.close()
+
+    def send_json(self, payload: dict[str, Any]) -> None:
+        # App-server uses JSON-RPC envelopes without the jsonrpc version key.
+        message = {key: value for key, value in payload.items() if key != "jsonrpc"}
+        encoded = json.dumps(message, separators=(",", ":")).encode("utf-8") + b"\n"
+        if len(encoded) > self.MAX_MESSAGE_BYTES:
+            raise SourceError("Codex request exceeds transport bound")
+        try:
+            assert self.process.stdin is not None
+            self.process.stdin.write(encoded)
+            self.process.stdin.flush()
+        except (OSError, ValueError) as exc:
+            raise SourceError("Codex app-server input closed") from exc
+
+    def receive_json(self) -> dict[str, Any]:
+        deadline = time.monotonic() + self.timeout
+        while b"\n" not in self.buffer:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or self.selector is None or not self.selector.select(remaining):
+                raise SourceError("Timed out waiting for Codex app-server JSONL")
+            assert self.process.stdout is not None
+            chunk = os.read(self.process.stdout.fileno(), 65536)
+            if not chunk:
+                raise SourceError("Codex app-server output closed")
+            self.buffer += chunk
+            if len(self.buffer) > self.MAX_MESSAGE_BYTES and b"\n" not in self.buffer:
+                raise SourceError("Codex app-server message exceeds transport bound")
+        line, self.buffer = self.buffer.split(b"\n", 1)
+        if len(line) > self.MAX_MESSAGE_BYTES:
+            raise SourceError("Codex app-server message exceeds transport bound")
+        try:
+            result = json.loads(line)
+        except (ValueError, UnicodeError) as exc:
+            raise SourceError("Invalid Codex app-server JSONL") from exc
+        if not isinstance(result, dict):
+            raise SourceError("Invalid Codex app-server response object")
+        return result
 
 
 class WebSocketClient:
@@ -463,7 +531,7 @@ def normalize_wham_usage_payload(payload: dict[str, Any]) -> dict[str, Any] | No
     return {"rateLimits": main, "rateLimitsByLimitId": {"codex": main}, "_source": "codex-app-server-wham-fallback"}
 
 
-def jsonrpc_call(ws: WebSocketClient, request_id: int, method: str, params: Any = None) -> dict[str, Any]:
+def jsonrpc_call(ws: WebSocketClient | StdioClient, request_id: int, method: str, params: Any = None) -> dict[str, Any]:
     message: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "method": method}
     if params is not None:
         message["params"] = params
@@ -494,13 +562,16 @@ def read_rate_limits(cfg: Config) -> dict[str, Any]:
     manager = AppServerManager(cfg)
     try:
         manager.ensure_ready()
-        with WebSocketClient("127.0.0.1", cfg.app_server_port, timeout=cfg.source_timeout_sec) as ws:
+        assert manager.process is not None
+        with StdioClient(manager.process, timeout=cfg.startup_timeout_sec) as ws:
             jsonrpc_call(
                 ws,
                 1,
                 "initialize",
                 {"clientInfo": {"name": APP_NAME, "title": "Codex Usage Monitor", "version": VERSION}},
             )
+            ws.send_json({"method": "initialized", "params": {}})
+            ws.timeout = cfg.source_timeout_sec
             return jsonrpc_call(ws, 2, "account/rateLimits/read")
     finally:
         manager.stop()
