@@ -30,6 +30,12 @@ The manifest records the byte offset already published. Each run reads only byte
 
 The publisher shares the existing `publisher.lock` and the existing private `codex-usage` checkout. It refuses to commit unrelated dirty paths in that checkout.
 
+Both publishers require affirmative, coherent GitHub metadata showing
+`visibility=PRIVATE` and `isPrivate=true`. Missing, malformed, contradictory or
+unavailable metadata blocks the run; Git access alone is not proof of privacy.
+This does not inspect or rewrite existing outgoing commits. Keep the data
+checkout exclusive to these publishers.
+
 ## Automation
 
 On Fedora, `codex-usage-publisher.service` runs the normal usage publisher first and then the complete chat-dump publisher. The existing `codex-usage-publisher.timer` runs the service every minute.

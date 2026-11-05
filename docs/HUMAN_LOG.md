@@ -13,6 +13,11 @@ Il servizio legge incrementalmente i JSONL nativi delle conversazioni Codex e cr
 
 ## Comandi
 
+La sanificazione usa la stessa API pubblica dell'archivio, anche nell'avvio
+diretto del runtime installato. I filtri aggiuntivi del registro restano attivi.
+Il testo ambiguo con credenziali viene omesso interamente prima del prompt e
+dei resoconti di fallback; non vengono riscritti i vecchi log o dati pubblicati.
+
 ```bash
 python3 codex_human_log.py once --bootstrap-chat 01a141a3-0879-7411-9245-6b144ba5ec41
 python3 codex_human_log.py once --translator plain
