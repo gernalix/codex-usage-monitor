@@ -255,10 +255,17 @@ def classify_git_repo(repo: Path, *, fetch: bool = True) -> dict[str, Any]:
     }
 
 
-def _repo_roots(path_texts: list[str]) -> list[Path]:
+def _repo_roots(
+    path_texts: list[str], *, cache: dict[str, Path | None] | None = None
+) -> list[Path]:
     repos: dict[str, Path] = {}
     for path_text in path_texts:
-        repo = _repo_root(path_text)
+        if cache is not None and path_text in cache:
+            repo = cache[path_text]
+        else:
+            repo = _repo_root(path_text)
+            if cache is not None:
+                cache[path_text] = repo
         if repo is not None:
             repos[str(repo)] = repo
     return [repos[key] for key in sorted(repos)]
@@ -503,12 +510,14 @@ def parse_session(
     last_prompt_id: str | None = None
     last_status: str | None = None
     migrated = False
+    # Resolve each exact path once for this parse; a later parse sees topology changes.
+    repo_root_cache: dict[str, Path | None] = {}
 
     for cycle in cycles:
         metrics = cycle["metrics"]
         raw_repo_paths = _stable_unique([str(value) for value in (metrics.get("repo_paths") or []) if value])
         metrics["repo_paths"] = raw_repo_paths
-        candidate_roots = _repo_roots(raw_repo_paths)
+        candidate_roots = _repo_roots(raw_repo_paths, cache=repo_root_cache)
         explicit_repos = [str(repo) for repo in candidate_roots]
         inferred_write_paths: list[str] = []
         for event in cycle.get("events") or []:
@@ -519,12 +528,12 @@ def parse_session(
                 _apply_patch_write_paths_from_event(event, candidate_roots, metrics.get("repo_project"))
             )
         write_paths = _stable_unique(list(metrics.get("repo_write_paths") or []) + inferred_write_paths)
-        write_repos = [str(repo) for repo in _repo_roots(write_paths)]
+        write_repos = [str(repo) for repo in _repo_roots(write_paths, cache=repo_root_cache)]
         if explicit_repos:
             metrics["repo_projects"] = explicit_repos
         else:
             fallback = metrics.get("repo_project")
-            metrics["repo_projects"] = [str(repo) for repo in _repo_roots([fallback] if isinstance(fallback, str) else [])]
+            metrics["repo_projects"] = [str(repo) for repo in _repo_roots([fallback] if isinstance(fallback, str) else [], cache=repo_root_cache)]
         metrics["repo_write_projects"] = write_repos
         metrics.pop("repo_write_paths", None)
         if len(write_repos) == 1:
