@@ -28,7 +28,8 @@ class RedactionBoundaryTests(unittest.TestCase):
                   '{"password": "short"}',
                   'client_secret: "' + marker + ' words"',
                   'credentials: "[REDACTED],' + marker + '"']
-        values += ['password="abcdefghijklmnop' + sep + 'SYNTHETIC_REMAINDER"'
+        fixture_password = "synthetic-fixture-password"
+        values += [f'password="{fixture_password}' + sep + 'SYNTHETIC_REMAINDER"'
                    for sep in (",", "]", "}")]
         values += ["cmd --password 'alpha'\"SYNTHETIC_REMAINDER\"",
                    "credentials: [SYNTHETIC_CREDENTIAL_VALUE]",
@@ -38,10 +39,13 @@ class RedactionBoundaryTests(unittest.TestCase):
                 with self.subTest(depth=depth, value=value):
                     saved = archive.redact_text(value)
                     self.assertNotIn(marker, saved)
+                    self.assertNotIn(fixture_password, saved)
                     self.assertNotIn("SYNTHETIC_REMAINDER", saved)
                     self.assertNotIn("short", saved)
                     self.assertEqual(archive.redact_text(saved), saved)
-                    self.assertNotIn(marker, human.clean(value))
+                    cleaned = human.clean(value)
+                    self.assertNotIn(marker, cleaned)
+                    self.assertNotIn(fixture_password, cleaned)
                 value = json.dumps(value)
 
     def test_url_userinfo_and_legitimate_controls(self):
