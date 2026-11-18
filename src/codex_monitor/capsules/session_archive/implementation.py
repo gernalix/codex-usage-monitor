@@ -48,10 +48,13 @@ SYSTEMD_USER_DIR = Path.home() / ".config/systemd/user"
 UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
 PROMPT_RE = re.compile(r"\bPROMPT_ID\s*[:=]\s*([A-Za-z0-9_.-]+)\b")
 SENSITIVE_KEY_RE = re.compile(
-    r"(token|secret|password|passwd|authorization|api[_-]?key|access[_-]?key|refresh[_-]?token|session[_-]?token|id[_-]?token)",
+    r"(token|secret|password|passwd|authorization|credentials?|cookie|private[_-]?key|api[_-]?key|access[_-]?key|refresh[_-]?token|session[_-]?token|id[_-]?token)",
     re.I,
 )
 SENSITIVE_TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r'''(https?://)[^\s/<>"']+@''', re.I), r"\1[REDACTED]@"),
+    (re.compile(r'''([a-z][a-z0-9+.-]*://)[^\s/@<>"']+:[^\s/<>"']*@''', re.I), r"\1[REDACTED]@"),
+    (re.compile(r"(?i)(\b(?:proxy-)?authorization\s*:\s*Basic\s+)[A-Za-z0-9+/=]+"), r"\1[REDACTED]"),
     # Shell transcripts can contain OAuth codes and short pairing PINs. Match
     # complete flag names, also through JSON-escaped quotes, without hiding
     # ordinary --code-file/--token-count arguments or unrelated source code.
@@ -153,6 +156,77 @@ def backup_sqlite(src: Path, dst: Path) -> None:
     os.chmod(dst, 0o600)
 
 
+def diagnostic_sqlite_copy(src: Path, dst: Path) -> None:
+    """Sanitize only a consistent disposable copy, including historical rows.
+
+    A backup alone preserves deleted/free-page content. Scrub every text cell,
+    omit opaque blobs, then VACUUM before this file can be hashed or packaged.
+    A constraint/unsupported schema error aborts export rather than falling back
+    to a raw copy. Original databases and their WAL files remain untouched.
+    """
+    backup_sqlite(src, dst)
+    quote = lambda name: '"' + str(name).replace('"', '""') + '"'
+    numeric_metrics = {"input_tokens", "cached_input_tokens", "uncached_input_tokens",
+                       "output_tokens", "reasoning_output_tokens", "total_tokens", "token_count"}
+    def scrub_json(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: (item if key in numeric_metrics and type(item) in (int, float)
+                          else "[REDACTED]" if SENSITIVE_KEY_RE.search(str(key))
+                          else scrub_json(item)) for key, item in value.items()}
+        if isinstance(value, list):
+            return [scrub_json(item) for item in value]
+        return redact_text(value) if isinstance(value, str) else value
+    with sqlite3.connect(dst, factory=_ClosingConnection) as con:
+        con.execute("PRAGMA secure_delete=ON")
+        tables = [row[0] for row in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+        for table in tables:
+            info = list(con.execute(f"PRAGMA table_info({quote(table)})"))
+            columns = [row[1] for row in info]
+            if not columns:
+                continue
+            primary = [row[1] for row in sorted(info, key=lambda row: row[5]) if row[5]]
+            rowid = next((name for name in ("rowid", "_rowid_", "oid") if name not in columns), None)
+            try:
+                if not rowid:
+                    raise sqlite3.OperationalError("no unshadowed rowid")
+                con.execute(f"SELECT {quote(rowid)} FROM {quote(table)} LIMIT 0")
+                identifiers = [rowid]
+            except sqlite3.OperationalError:
+                if not primary:
+                    raise ArchiveError("diagnostic database has no safe row identity")
+                identifiers = primary
+            select = ",".join(map(quote, identifiers + columns))
+            rows = con.execute(f"SELECT {select} FROM {quote(table)}").fetchall()
+            for row in rows:
+                identity, values = row[:len(identifiers)], row[len(identifiers):]
+                sanitized = []
+                for column, value in zip(columns, values):
+                    if isinstance(value, str):
+                        if SENSITIVE_KEY_RE.search(column):
+                            sanitized.append("[REDACTED]")
+                        else:
+                            try:
+                                decoded = json.loads(value)
+                            except ValueError:
+                                sanitized.append(redact_text(value))
+                            else:
+                                scrubbed = scrub_json(decoded)
+                                sanitized.append(value if scrubbed == decoded else json.dumps(scrubbed, ensure_ascii=False))
+                    elif isinstance(value, bytes):
+                        sanitized.append(b"[BINARY_CONTENT_REDACTED]")
+                    else:
+                        sanitized.append(value)
+                if list(values) != sanitized:
+                    assignments = ",".join(f"{quote(column)}=?" for column in columns)
+                    predicate = " AND ".join(f"{quote(column)} IS ?" for column in identifiers)
+                    con.execute(f"UPDATE {quote(table)} SET {assignments} WHERE {predicate}",
+                                [*sanitized, *identity])
+        con.commit()
+        con.execute("VACUUM")
+    os.chmod(dst, 0o600)
+
+
 def ensure_private_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     os.chmod(path, 0o700)
@@ -233,6 +307,38 @@ def snapshot_source(src: Path, temp_parent: Path) -> tuple[Path, str, int]:
 
 ENCODED_JSON_RE = re.compile(r"(?<![A-Za-z0-9+/])ey[A-Za-z0-9+/]{78,}={0,2}(?![A-Za-z0-9+/=])")
 
+_CREDENTIAL_CONTEXT = re.compile(
+    r'''(?i)(?<![\w])(?:[a-z0-9]+[_-])*(?:password|passwd|credentials?|authorization|secret|token|api[_-]?key|cookie|private[_-]?key)(?:\\*["'])?\s*[:=]\s*(?=([^\n]*))'''
+)
+_CREDENTIAL_FLAG_CONTEXT = re.compile(
+    r'''(?i)(?<![\w-])--(?:code|pin|password|passwd|token|api[-_]?key|secret|cookie|authorization|credentials?)(?:=|[ \t]+)(?=([^\n]*))'''
+)
+_MARKER = r"\[(?:REDACTED|ASSERTION_VALUE_REDACTED|ENCODED_RUNNER_CREDENTIALS_REDACTED|ENCRYPTED_CONTENT_OMITTED_FROM_NORMALIZED_RAW_AVAILABLE|GOOGLE_OAUTH_CODE_REDACTED|GOOGLE_ACCESS_TOKEN_REDACTED|GOOGLE_API_KEY_REDACTED|TELEGRAM_TOKEN_REDACTED|OPENAI_KEY_REDACTED|GITHUB_TOKEN_REDACTED|JWT_REDACTED|RISERVATO|CHIAVE_RIMOSSA|TOKEN_RIMOSSO)\]"
+_SAFE_CREDENTIAL_VALUE = re.compile(
+    rf'''^(?:(?:Basic|Bearer)\s+)?(?:"{_MARKER}"|'{_MARKER}')(?=\s*$|\s*[,}}\]]|\s+--[\w-]+(?:[\s=]|$))|^(?:(?:Basic|Bearer)\s+)?{_MARKER}(?=\s*$|\s+--[\w-]+(?:[\s=]|$))''',
+    re.I,
+)
+_OMITTED_CREDENTIAL_TEXT = "[CREDENTIAL_CONTENT_REDACTED]"
+
+
+def _remaining_credential_content(text: str) -> bool:
+    # Inspect encoded representations without changing JSON/CSV quoting. For
+    # ambiguous quoted/block/flow values omit the entire string, never a prefix
+    # of a multiword credential. Raw originals remain in the private archive.
+    inspected = text
+    for _ in range(4):
+        inspected = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m[1], 16)), inspected)
+        inspected = inspected.replace('\\"', '"').replace('""', '"')
+        inspected = inspected.replace(r"\/", "/")
+    if re.search(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", inspected):
+        return True
+    for match in re.finditer(r'''(?i)(?:https?://([^\s/<>"']+)@|[a-z][a-z0-9+.-]*://([^\s/@<>"']+:[^\s/<>"']*)@)''', inspected):
+        if (match[1] or match[2]) != "[REDACTED]":
+            return True
+    return any(not _SAFE_CREDENTIAL_VALUE.match(match[1])
+               for pattern in (_CREDENTIAL_CONTEXT, _CREDENTIAL_FLAG_CONTEXT)
+               for match in pattern.finditer(inspected))
+
 
 def redact_runner_bundle(match: re.Match[str]) -> str:
     encoded = match.group(0)
@@ -257,7 +363,8 @@ def redact_text(value: str) -> str:
             text = text.replace(literal, "[ASSERTION_VALUE_REDACTED]")
     for pattern, replacement in SENSITIVE_TEXT_PATTERNS:
         text = pattern.sub(replacement, text)
-    return ENCODED_JSON_RE.sub(redact_runner_bundle, text)
+    text = ENCODED_JSON_RE.sub(redact_runner_bundle, text)
+    return _OMITTED_CREDENTIAL_TEXT if _remaining_credential_content(text) else text
 
 
 def redact_obj(value: Any, key_hint: str = "") -> Any:
@@ -330,7 +437,8 @@ def repo_info_for_cwd(cwd: str | None) -> dict[str, str | None]:
         branch = subprocess.check_output(["git", "-C", str(path), "rev-parse", "--abbrev-ref", "HEAD"], text=True, stderr=subprocess.DEVNULL).strip()
         sha = subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL).strip()
         remote = subprocess.run(["git", "-C", str(path), "config", "--get", "remote.origin.url"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False).stdout.strip() or None
-        return {"repo_root": root, "git_branch": branch, "git_sha": sha, "git_remote": remote}
+        return {"repo_root": root, "git_branch": branch, "git_sha": sha,
+                "git_remote": redact_text(remote) if remote else None}
     except subprocess.CalledProcessError:
         return {"repo_root": None, "git_branch": None, "git_sha": None, "git_remote": None}
 
@@ -1079,7 +1187,7 @@ def add_file_copy(
     dst = staging_root / arcname
     ensure_private_dir(dst.parent)
     if sqlite_table:
-        backup_sqlite(source, dst)
+        diagnostic_sqlite_copy(source, dst)
     elif redact_text_file:
         dst.write_text(redact_text(source.read_text(encoding="utf-8", errors="replace")), encoding="utf-8")
         os.chmod(dst, 0o600)

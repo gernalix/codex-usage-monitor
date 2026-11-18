@@ -22,3 +22,8 @@ Raw copies, auth databases, cookies and credentials must not enter Git. Only
 redacted derived publication belongs in the private codex-usage repository.
 Back up a live SQLite database through its backup API, preserving WAL and
 schema; use the owning application for migrations and semantic writes.
+
+Diagnostic bundles sanitize disposable SQLite snapshots, including historical
+text cells, omit opaque blobs and remove old free pages before packaging.
+Schema, numeric metrics and original databases are preserved. Source archives
+remain private; no historical Git publication is automatically rewritten.

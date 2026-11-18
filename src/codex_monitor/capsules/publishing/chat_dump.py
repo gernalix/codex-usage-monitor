@@ -214,8 +214,8 @@ def command_run(args: argparse.Namespace) -> int:
     root = Path(args.source_root).expanduser()
     state_dir = Path(args.state_dir).expanduser()
     repo = Path(args.data_repo).expanduser()
-    state_dir.mkdir(parents=True, exist_ok=True)
     publisher.assert_private_repo(args.remote)
+    state_dir.mkdir(parents=True, exist_ok=True)
     with publisher.ExclusiveLock(state_dir / "publisher.lock"):
         publisher.ensure_repo(repo, args.remote)
         foreign = [path for path in dirty_paths(repo) if not owned(path)]

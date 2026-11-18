@@ -21,6 +21,9 @@ import tempfile
 import time
 from zoneinfo import ZoneInfo
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+from codex_monitor.capsules.session_archive import api as archive_redaction
+
 SOURCE = Path.home() / ".codex/sessions"
 STATE_DIR = Path.home() / ".local/state/codex-human-log"
 MEGAVAULT = Path.home() / "MegaVault/megavault.sqlite"
@@ -40,7 +43,7 @@ FIELDS = ("situazione", "novita", "prossimo_passo", "azione_utente", "incertezze
 
 
 def clean(value: object, limit: int = 1800) -> str:
-    text = str(value or "")
+    text = archive_redaction.redact_text(str(value or ""))
     for pattern, substitute in SAFE_REPLACEMENTS:
         text = pattern.sub(substitute, text)
     text = "".join(c for c in text if c >= " " or c in "\n\t").strip()

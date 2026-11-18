@@ -641,12 +641,15 @@ def ensure_repo(repo: Path, remote: str) -> None:
 
 
 def assert_private_repo(remote: str) -> None:
-    result = run(["gh", "repo", "view", remote, "--json", "visibility,isPrivate"], timeout=30)
-    if result.returncode != 0:
-        return
-    data = json.loads(result.stdout)
-    if data.get("visibility") == "PUBLIC" or data.get("isPrivate") is False:
-        raise PublisherError("BLOCKED_REPO_PUBLIC")
+    try:
+        result = run(["gh", "repo", "view", remote, "--json", "visibility,isPrivate"], timeout=30)
+        if result.returncode != 0:
+            raise PublisherError("BLOCKED_REPO_PRIVACY_UNVERIFIED")
+        data = json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        raise PublisherError("BLOCKED_REPO_PRIVACY_UNVERIFIED") from exc
+    if not isinstance(data, dict) or data.get("visibility") != "PRIVATE" or data.get("isPrivate") is not True:
+        raise PublisherError("BLOCKED_REPO_PRIVACY_UNVERIFIED")
 
 
 def prompt_dir(metrics: dict[str, Any]) -> Path:
