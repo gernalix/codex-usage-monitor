@@ -212,3 +212,25 @@ Production Fedora runtime must be deployed from a **clean, upstream-synchronized
 `/home/daniele/.local/lib/codex-usage-monitor`
 
 Do not maintain a second production deployment on the Oracle VM. If the VM still contains historical service/timer units or a checkout of this repository, retire them only after Fedora acquisition, archive, publisher, chat-dump publication and heartbeat behavior have all been verified.
+
+## Dashboard live: processi, sessioni e quota
+
+La dashboard in sola lettura su Fedora mostra PID Codex attivi, eventi token delle
+sessioni locali (aggiornati ogni 2 secondi) e quota settimanale dall'SQLite
+canonico (campionata dal timer esistente ogni 15 minuti). Non chiama modelli,
+non invia notifiche, non modifica il database e non crea un secondo collector.
+I token osservati **non** sono la quota esatta fatturata a ciascun PID;
+le esecuzioni cloud e da altri dispositivi possono non avere un JSONL locale.
+Non viene dedotta un'associazione PID→chat non provata.
+
+Dopo il deploy immutabile tramite `python3 deploy_runtime.py` sul ramo main sincronizzato, avviare systemd utente:
+
+```bash
+install -m 0644 systemd/codex-live-dashboard.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now codex-live-dashboard.service
+```
+
+Aprire **http://127.0.0.1:8787/** su Fedora. L'interfaccia è intenzionalmente
+vincolata a localhost: non esporla senza autenticazione tramite un proxy fidato.
+Verifica: `curl -f http://127.0.0.1:8787/healthz`.

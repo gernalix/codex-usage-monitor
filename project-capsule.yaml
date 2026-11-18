@@ -20,6 +20,7 @@ architecture:
     boundaries.
   entrypoints:
   - codex_usage_monitor.py
+  - codex_live_dashboard.py
   - codex_session_archive.py
   - codex_usage_publisher.py
   - codex_human_log.py
@@ -45,6 +46,7 @@ data:
 runtime:
   services:
   - codex-usage-monitor.service
+  - codex-live-dashboard.service
   - codex-session-archive.service
   - codex-usage-publisher.service
   - codex-human-log.service

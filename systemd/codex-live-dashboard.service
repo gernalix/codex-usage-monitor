@@ -1,0 +1,17 @@
+[Unit]
+Description=Read-only live Codex activity dashboard (localhost)
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=/home/daniele/projects/codex-usage-monitor
+ExecStart=/usr/bin/python3 /home/daniele/.local/lib/codex-usage-monitor/current/codex_live_dashboard.py --port 8787
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=default.target

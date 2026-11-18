@@ -14,6 +14,7 @@ DEFAULT_RUNTIME_ROOT = Path.home() / ".local/lib/codex-usage-monitor"
 DEFAULT_FETCH_TIMEOUT_SECONDS = 30
 RUNTIME_FILES = (
     "codex_usage_monitor.py",
+    "codex_live_dashboard.py",
     "codex_session_archive.py",
     "codex_session_archive_incremental.py",
     "codex_task_costs.py",
@@ -96,7 +97,7 @@ def runtime_hashes(root: Path) -> dict[str, str]:
     package = root / RUNTIME_PACKAGE
     if not package.is_dir():
         raise DeployError(f"missing runtime package: {RUNTIME_PACKAGE}")
-    for path in sorted(package.rglob("*.py")):
+    for path in sorted(p for p in package.rglob("*") if p.is_file() and p.suffix in {".py", ".html"}):
         relative = path.relative_to(root).as_posix()
         hashes[relative] = file_sha256(path)
     return hashes

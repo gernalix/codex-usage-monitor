@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Codex — attività e quota live</title>
+<style>
+:root { color-scheme: dark; font: 15px/1.45 system-ui, sans-serif; background:#10151d; color:#e7edf4 }
+* { box-sizing:border-box }
+body { max-width:1180px; margin:auto; padding:25px 18px 60px }
+header { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px }
+h1 { font-size:1.65rem; margin:0 }
+h2 { font-size:1.1rem; margin:0 0 9px }
+small, .muted { color:#9baaba }
+small { font-size:.82rem }
+.dot { display:inline-block; background:#4ade80; width:9px; height:9px; border-radius:100%; margin-right:7px }
+.grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:13px; margin-top:22px }
+.card,section { border:1px solid #334155; background:#1b2430; border-radius:12px; padding:18px }
+.big { font-size:1.85rem; font-weight:650; margin:3px 0 }
+.progress { background:#344458; border-radius:20px; height:8px; overflow:hidden; margin:9px 0 }
+#bar { width:0; height:100%; background:#70a8ff; transition:width .4s }
+section { margin-top:18px }
+.hint { border-left:3px solid #82b4e9; padding-left:12px; margin:16px 0; color:#bdcbd9 }
+table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums }
+th { color:#adbccc; text-align:left; font-size:.81rem; font-weight:600 }
+td,th { border-bottom:1px solid #334155; padding:10px 8px; vertical-align:top }
+tr:last-child td { border-bottom:0 }
+td .highlight { color:#75dda4; font-weight:700 }
+a { color:#95bdff; text-decoration:none }
+a:hover { text-decoration:underline }
+.tag { display:inline-block; border:1px solid #4b647a; padding:1px 7px; border-radius:20px; font-size:.78rem }
+ul { margin:7px 0; padding-left:19px }
+#errors { color:#ffac9c; font-weight:600 }
+.scroll { overflow-x:auto }
+footer { margin-top:25px; color:#9baaba; font-size:.85rem }
+@media (max-width:750px) { .grid { grid-template-columns:1fr } body { padding:18px 10px } td,th { padding:9px 6px } }
+</style>
+</head>
+<body>
+<header>
+  <div><h1>Codex · attività in tempo reale</h1><div class="muted">Fedora · osservazione passiva · nessun consumo AI generato dalla dashboard</div></div>
+  <div><span class="dot" id="dot"></span><span id="connection">Connessione...</span><div><small id="updated">—</small></div></div>
+</header>
+<div class="grid">
+  <div class="card"><div class="muted">Quota settimanale residua</div><div id="remaining" class="big">—</div><div class="progress"><div id="bar"></div></div><small id="quota-time">Ultima lettura: —</small></div>
+  <div class="card"><div class="muted">Token osservati · ultimi 60 secondi</div><div id="tokens" class="big">—</div><small>Minimo rilevato nei log locali; non equivale a unità di quota</small></div>
+  <div class="card"><div class="muted">Ultimo calo della quota</div><div id="last-drop" class="big">—</div><small id="drop-detail">—</small></div>
+</div>
+<p class="hint"><b>Significato:</b> «Token osservati» prova attività nelle sessioni locali, non la quota esatta addebitata. Un PID attivo non prova che stia consumando quota. I processi cloud e gli altri dispositivi possono restare invisibili.</p>
+<section>
+<h2>Sessioni Codex con eventi recenti</h2>
+<div class="muted" id="session-summary">Attendo i dati...</div>
+<div class="scroll"><table><thead><tr><th>Chat / progetto</th><th>Origine</th><th>Token negli ultimi 60 s</th><th>Ultimo evento token</th></tr></thead><tbody id="sessions"></tbody></table></div>
+</section>
+<section>
+<h2>Processi Codex attualmente in esecuzione</h2>
+<div class="muted">Processi locali e PID, senza associazione inventata tra PID e chat.</div>
+<div class="scroll"><table><thead><tr><th>PID</th><th>Componente</th><th>Interpretazione</th></tr></thead><tbody id="processes"></tbody></table></div>
+</section>
+<p id="errors"></p>
+<footer>Aggiornamento automatico ogni 2 secondi. La quota proviene dal monitor SQLite esistente (campionamento ogni 15 minuti); gli eventi locali vengono letti dai JSONL nativi in tempo quasi reale. Interfaccia accessibile solo da questo computer.</footer>
+<script>
+const number = new Intl.NumberFormat('it-IT');
+const dateFmt = new Intl.DateTimeFormat('it-IT',{timeZone:'Europe/Copenhagen',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'});
+function fmtTime(v) { const n=Date.parse(v); return Number.isFinite(n)?dateFmt.format(new Date(n)):'—'; }
+function put(id,value) { document.getElementById(id).textContent=value; }
+function cell(tr,value) { const td=document.createElement('td');td.textContent=value;tr.appendChild(td);return td; }
+function emptyRow(tbody,message,count) { const tr=document.createElement('tr'); const td=cell(tr,message);td.colSpan=count;tbody.appendChild(tr); }
+function draw(data) {
+  const quota=data.quota||{};
+  put('remaining',typeof quota.remaining_percent==='number'?number.format(quota.remaining_percent)+'%':'—');
+  document.getElementById('bar').style.width=typeof quota.remaining_percent==='number'?Math.max(0,Math.min(100,quota.remaining_percent))+'%':'0%';
+  put('quota-time',quota.acquired_at?'Campionamento: '+fmtTime(quota.acquired_at):'Dati quota non disponibili');
+  const drop=quota.last_drop;
+  put('last-drop',drop?number.format(drop.delta_pp)+' punti %':'—');
+  put('drop-detail',drop?'Rilevato '+fmtTime(drop.at)+(drop.local_sessions!==undefined?' · '+drop.local_sessions+' sessioni locali associate':' · attribuzione non disponibile'):'Nessun calo identificato nelle ultime 200 letture');
+  const local=data.local||{};
+  const sessions=local.sessions||[];
+  const sum=sessions.reduce((total,row)=>total+row.tokens_60s,0);
+  put('tokens',number.format(sum));
+  put('session-summary',sessions.length+' sessioni con eventi recenti · '+local.scanned+' file controllati'+(local.truncated?' · scansione limitata':''));
+  const tbody=document.getElementById('sessions');tbody.replaceChildren();
+  if(!sessions.length) emptyRow(tbody,'Nessun evento token nei JSONL locali negli ultimi 5 minuti. Questo non esclude attività cloud.',4);
+  for(const s of sessions) {
+    const tr=document.createElement('tr');
+    const td=document.createElement('td');
+    const a=document.createElement('a');a.href=s.thread_url;a.textContent=s.project||s.session_id;
+    td.appendChild(a);
+    const line=document.createElement('div');line.className='muted';line.textContent=s.session_id;td.appendChild(line);tr.appendChild(td);
+    cell(tr,s.source);
+    const t=cell(tr,number.format(s.tokens_60s)+(s.partial?' (parziale)':''));
+    if(s.tokens_60s>0) t.className='highlight';
+    cell(tr,fmtTime(s.last_token_at)+' ('+s.seconds_since_tokens+' s fa)');
+    tbody.appendChild(tr);
+  }
+  const procs=data.processes||[];
+  const pbody=document.getElementById('processes');pbody.replaceChildren();
+  if(!procs.length) emptyRow(pbody,'Nessun processo Codex locale identificato.',3);
+  for(const p of procs) {const tr=document.createElement('tr');cell(tr,String(p.pid));cell(tr,p.role);cell(tr,p.note);pbody.appendChild(tr);}
+  put('updated','Aggiornato '+fmtTime(data.observed_at));
+  put('connection','In diretta');
+  document.getElementById('dot').style.background='#4ade80';
+  put('errors','');
+}
+let busy=false;
+async function refresh() {
+ if(busy)return;busy=true;
+ try { const response=await fetch('/api/status',{cache:'no-store'});if(!response.ok)throw Error('HTTP '+response.status);draw(await response.json()); }
+ catch(e) {put('connection','Dati non aggiornati');document.getElementById('dot').style.background='#ff7575';put('errors','Errore: '+String(e));}
+ finally {busy=false;}
+}
+refresh();setInterval(refresh,2000);
+</script>
+</body>
+</html>
