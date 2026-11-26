@@ -15,9 +15,11 @@ repository:
   branch_policy: Use isolated task worktrees and the installed single writer; integrate
     through the protected main pipeline.
 architecture:
-  summary: Public APIs separate quota, session archive, prompt analysis, publishing,
-    source registry and runtime deployment; AST checks enforce import and adapter
-    boundaries.
+  summary: >-
+    Public APIs separate quota, session archive, prompt analysis, publishing, source registry
+    and runtime deployment; AST checks enforce import and adapter boundaries. The quota
+    capsule also serves the read-only live dashboard. Session archival and publication retain
+    separate ownership and verification.
   entrypoints:
   - codex_usage_monitor.py
   - codex_live_dashboard.py
@@ -31,6 +33,7 @@ architecture:
   - scripts/check_architecture_boundaries.py
   - systemd
   - tests
+  - src/codex_monitor/capsules/quota/live_dashboard.py
 dependencies:
 - name: Python standard library
   purpose: Runtime, SQLite, JSON, archival and unit tests.
@@ -133,7 +136,7 @@ references:
   c2: 'Historical-only reference: /home/daniele/projects/codex-roadmap/roadmap.sqlite;
     no lifecycle writes.'
 freshness:
-  reviewed_commit: 67887fe773f4106099646317b608aafcc881d173
+  reviewed_commit: 99df340df5d0deae09cfa1fb38a06663818320e0
   watch_paths:
   - src
   - systemd
