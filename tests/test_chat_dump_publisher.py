@@ -67,3 +67,24 @@ def test_append_rollout_is_incremental_and_preserves_full_redacted_records(tmp_p
     manifest = json.loads((base / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["complete_through_byte"] == source.stat().st_size
     assert manifest["chunk_count"] == 3
+
+
+def test_provider_context_covers_records_in_same_chunk(tmp_path) -> None:
+    session = "11111111-2222-3333-4444-555555555555"
+    source = tmp_path / f"rollout-{session}.jsonl"
+    digest = "f9e813a7ca05132b6d2c" * 2
+    provider = "Source" + "graph"
+    records = [line({"type": "diagnostic", "output": "Git ref " + digest, "count": 2}),
+               line({"type": "note", "text": provider + " diagnostic"})]
+    source.write_text("".join(records), encoding="utf-8")
+    repo = tmp_path / "first"
+    chunk = f"native-sessions/{session}/sources/{dumps.source_key(source)}/chunks/000001.jsonl"
+    assert dumps.append_rollout(repo, source) == {"changed": True, "records": 2}
+    output = [json.loads(row) for row in (repo / chunk).read_text(encoding="utf-8").splitlines()]
+    assert output[0] == {"type": "diagnostic", "output": "Git ref [REDACTED]", "count": 2}
+    assert output[1]["text"] == provider + " diagnostic"
+
+    source.write_text(records[0], encoding="utf-8")
+    other = tmp_path / "second"
+    assert dumps.append_rollout(other, source) == {"changed": True, "records": 1}
+    assert digest in (other / chunk).read_text(encoding="utf-8")

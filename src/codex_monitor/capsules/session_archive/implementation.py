@@ -342,6 +342,21 @@ _SOURCEGRAPH_TOKEN_TEXT = re.compile(r"\bsourcegraph\b|sgp_", re.IGNORECASE)
 _BARE_SOURCEGRAPH_TOKEN = re.compile(r"\b[a-f0-9]{40}\b", re.IGNORECASE)
 
 
+def has_sourcegraph_context(text: str) -> bool:
+    return _SOURCEGRAPH_TOKEN_TEXT.search(text) is not None
+
+
+def redact_bare_sourcegraph_tokens(value: Any) -> Any:
+    """Mask legacy token-shaped string values within a provider fragment."""
+    if isinstance(value, str):
+        return _BARE_SOURCEGRAPH_TOKEN.sub("[REDACTED]", value)
+    if isinstance(value, dict):
+        return {key: redact_bare_sourcegraph_tokens(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_bare_sourcegraph_tokens(item) for item in value]
+    return value
+
+
 def _mask_opaque_literal(match: re.Match[str]) -> str:
     value = match["value"]
     length = len(value)
@@ -403,8 +418,8 @@ def redact_text(value: str) -> str:
     for pattern, replacement in SENSITIVE_TEXT_PATTERNS:
         text = pattern.sub(replacement, text)
     text = ENCODED_JSON_RE.sub(redact_runner_bundle, text)
-    if _SOURCEGRAPH_TOKEN_TEXT.search(text):
-        text = _BARE_SOURCEGRAPH_TOKEN.sub("[REDACTED]", text)
+    if has_sourcegraph_context(text):
+        text = redact_bare_sourcegraph_tokens(text)
     text = _OPAQUE_LITERAL.sub(_mask_opaque_literal, text)
     return _OMITTED_CREDENTIAL_TEXT if _remaining_credential_content(text) else text
 

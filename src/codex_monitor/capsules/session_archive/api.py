@@ -7,7 +7,7 @@ from .implementation import (
     command_verify, connect_db, enforce_private_tree, ensure_private_dir,
     export_threads_metadata, extract_text, first_uuid_from_path, import_session,
     import_source_file, init_db, main, parse_ts, prompt_id_from_text, redact_obj,
-    redact_text, sqlite_has_table, utc_stamp,
+    has_sourcegraph_context, redact_bare_sourcegraph_tokens, redact_text, sqlite_has_table, utc_stamp,
 )
 
 __all__ = [name for name in (
@@ -18,5 +18,5 @@ __all__ = [name for name in (
     "ensure_private_dir", "export_threads_metadata", "extract_text",
     "first_uuid_from_path", "import_session", "import_source_file", "init_db",
     "main", "parse_ts", "prompt_id_from_text", "redact_obj", "redact_text",
-    "sqlite_has_table", "utc_stamp",
+    "has_sourcegraph_context", "redact_bare_sourcegraph_tokens", "sqlite_has_table", "utc_stamp",
 )]

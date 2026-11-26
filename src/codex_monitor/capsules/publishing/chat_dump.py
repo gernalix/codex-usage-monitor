@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
-from typing import Any
+from typing import Any, TextIO
 
 from codex_monitor.capsules.session_archive import api as archive
 from . import legacy_api as publisher
@@ -76,12 +76,24 @@ def write_text(path: Path, text: str) -> bool:
     return True
 
 
+def redact_sourcegraph_chunk(source: TextIO, target: TextIO) -> None:
+    """Mask legacy token-shaped values across one JSONL publication fragment."""
+    for line in source:
+        record = json.loads(line)
+        masked = archive.redact_bare_sourcegraph_tokens(record)
+        if masked == record:
+            target.write(line)
+        else:
+            target.write(json.dumps(masked, ensure_ascii=False, sort_keys=True) + "\n")
+
+
 def append_chunk(source: Path, offset: int, target: Path) -> tuple[int, int]:
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
     count = 0
     end = offset
     output_bytes = 0
+    sourcegraph_context = False
     try:
         with source.open("rb") as inp, os.fdopen(fd, "w", encoding="utf-8") as out:
             inp.seek(offset)
@@ -106,6 +118,7 @@ def append_chunk(source: Path, offset: int, target: Path) -> tuple[int, int]:
                 if count and output_bytes + encoded_size > MAX_CHUNK_OUTPUT_BYTES:
                     inp.seek(start)
                     break
+                sourcegraph_context |= archive.has_sourcegraph_context(rendered_line)
                 out.write(rendered_line)
                 output_bytes += encoded_size
                 count += 1
@@ -115,7 +128,19 @@ def append_chunk(source: Path, offset: int, target: Path) -> tuple[int, int]:
         if not count:
             os.unlink(tmp)
             return offset, 0
-        os.replace(tmp, target)
+        if sourcegraph_context:
+            fd, sanitized = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as out, open(tmp, encoding="utf-8") as inp:
+                    redact_sourcegraph_chunk(inp, out)
+                    out.flush()
+                    os.fsync(out.fileno())
+                os.replace(sanitized, target)
+            finally:
+                if os.path.exists(sanitized):
+                    os.unlink(sanitized)
+        else:
+            os.replace(tmp, target)
         return end, count
     finally:
         try:
