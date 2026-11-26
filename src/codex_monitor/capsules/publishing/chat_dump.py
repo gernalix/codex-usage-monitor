@@ -12,6 +12,7 @@ from typing import Any
 
 from codex_monitor.capsules.session_archive import api as archive
 from . import legacy_api as publisher
+from . import push_retry
 
 VERSION = "2026.09.16"
 DEFAULT_SOURCE_ROOT = Path.home() / ".codex/sessions"
@@ -217,6 +218,8 @@ def command_run(args: argparse.Namespace) -> int:
     publisher.assert_private_repo(args.remote)
     state_dir.mkdir(parents=True, exist_ok=True)
     with publisher.ExclusiveLock(state_dir / "publisher.lock"):
+        if not args.no_push:
+            push_retry.check_backoff(state_dir)
         publisher.ensure_repo(repo, args.remote)
         foreign = [path for path in dirty_paths(repo) if not owned(path)]
         if foreign:
@@ -240,7 +243,7 @@ def command_run(args: argparse.Namespace) -> int:
                 raise publisher.PublisherError("git diff --cached failed")
         pushed = False
         if ahead(repo) > 0 and not args.no_push:
-            publisher.git_ok(["git", "push", "origin", "main"], repo, timeout=240)
+            push_retry.push(repo, state_dir, publisher.git_ok)
             pushed = True
         print(json.dumps({"status": "published" if pushed else "noop", "sources_seen": seen, "sources_changed": changed, "records_written": records}, sort_keys=True))
         return 0

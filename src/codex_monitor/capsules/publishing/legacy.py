@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import shutil
 import sqlite3
+import signal
 import subprocess
 import sys
 import tempfile
@@ -108,6 +109,20 @@ def digest_text(text: str) -> str:
 
 
 def run(cmd: list[str], cwd: Path | None = None, *, timeout: int = 120) -> subprocess.CompletedProcess[str]:
+    if cmd[:2] == ["git", "push"]:
+        # git-trace, Git, the transport and the secret scan form one job.
+        with subprocess.Popen(cmd, cwd=cwd, text=True, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, start_new_session=True) as process:
+            try:
+                stdout, stderr = process.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.communicate()
+                raise
+            return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
     return subprocess.run(cmd, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=timeout)
 
 
@@ -776,6 +791,8 @@ def command_run(
     utc_stamp_fn=utc_stamp,
     source_generation: str | None = None,
 ) -> int:
+    from . import push_retry
+
     assert_private_repo_fn(args.remote)
     state_dir = Path(args.state_dir).expanduser()
     source_root = Path(args.source_root).expanduser()
@@ -785,6 +802,11 @@ def command_run(
         state_dir / "publisher.lock",
         wait_seconds=float(getattr(args, "wait_lock_seconds", 0.0) or 0.0),
     ):
+        if not args.no_push:
+            push_retry.check_backoff(state_dir)
+        if not args.no_push and push_retry.pending(repo, state_dir, run_fn):
+            ensure_repo_fn(repo, args.remote)
+            push_retry.push(repo, state_dir, git_ok_fn)
         with connect_state_fn(state_dir) as con:
             source_paths = sorted(source_root.glob("**/*.jsonl"))
             source_snapshot = _source_snapshot(source_paths)
@@ -901,7 +923,7 @@ def command_run(
             else:
                 msg = f"usage: publish {len(pending_cycles)} prompt cycles"
             git_ok_fn(["git", "commit", "-m", msg], repo)
-            git_ok_fn(["git", "push", "origin", "main"], repo, timeout=240)
+            push_retry.push(repo, state_dir, git_ok_fn)
             commit = run_fn(["git", "rev-parse", "HEAD"], repo).stdout.strip()
             for cycle in pending_cycles:
                 m = cycle["metrics"]

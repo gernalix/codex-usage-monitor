@@ -22,3 +22,11 @@ Credential consumers and update modes are tracked in the shared Bitwarden
 runtime manifest. A running process retains its startup credentials; a file
 prepared for a later restart is not evidence of a completed consumer cutover.
 Native rollouts and raw archive copies stay private and local.
+
+The usage and chat publishers keep an interrupted push in
+`push-retry.json` under their existing state directory and share their existing lock.
+The next eligible invocation retries the committed data before exporting another
+snapshot. A normal Git push, including the pre-push secret check, has up to 20
+minutes. On failure the delay grows from five minutes to a maximum of six hours.
+Inspect the user unit journal for the reason if the backlog persists. Source
+files, local commits and the remote's normal fast-forward protection are preserved.
