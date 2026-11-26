@@ -79,6 +79,22 @@ class SessionArchiveTests(unittest.TestCase):
         reference = f'curl --user "${{USERNAME}}:${{PASSWORD}}" {url}'
         self.assertEqual(archive_redaction.redact_text(reference), reference)
 
+    def test_publication_literals_in_terminal_and_provider_context(self) -> None:
+        sample = "vF2R8M2u9A4bhQ6z"
+        label = "KeyError"
+        output = "\n".join(("Earlier diagnostic", label + ": " + repr(sample)))
+        saved = archive_redaction.redact_text(json.dumps(output))
+        self.assertNotIn(sample, saved)
+        self.assertEqual(archive_redaction.redact_text(saved), saved)
+
+        digest = "f9e813a7ca05132b6d2c" * 2
+        ordinary = "Git commit " + digest
+        provider = "Source" + "graph"
+        self.assertEqual(archive_redaction.redact_text(ordinary), ordinary)
+        self.assertNotIn(digest, archive_redaction.redact_text(provider + " diagnostic " + digest))
+        self.assertEqual(archive_redaction.redact_text("token count: 101010101010"),
+                         "token count: 101010101010")
+
     def test_google_oauth_values_are_redacted_without_surrounding_command(self) -> None:
         for candidate in ("4/0A" + "x" * 40, "ya29." + "x" * 40):
             saved = archive_redaction.redact_obj({"output": candidate, "nested": ["value " + candidate]})

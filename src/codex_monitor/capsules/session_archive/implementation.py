@@ -4,11 +4,13 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+from collections import Counter
 import datetime as dt
 import fcntl
 import gzip
 import hashlib
 import json
+from math import log2
 import os
 from pathlib import Path
 import re
@@ -326,6 +328,29 @@ _CURL_USER_CREDENTIAL = re.compile(
 _SHELL_VAR = re.compile(r"\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)")
 
 
+# Free-form terminal and tool text can contain credential-like assignments
+# outside the structured credential schema, including escaped tracebacks.
+_OPAQUE_LITERAL = re.compile(
+    r"""(?P<label>(?:access|auth|api|credential|creds|key|passw(?:or)?d|secret|token)
+        [\x20\t\w.-]{0,20}[\s\x27\x22]{0,3}
+        (?:=>|:{1,3}=|\|\||\?=|[=>:,])[\x60\x27\x22\s=]{0,5})
+        (?P<value>[\w.=-]{10,150}|[a-z0-9][a-z0-9+/]{11,}={0,3})
+        (?=[\x60\x27\x22\s;]|\\[nr]|$)""",
+    re.IGNORECASE | re.VERBOSE,
+)
+_SOURCEGRAPH_TOKEN_TEXT = re.compile(r"\bsourcegraph\b|sgp_", re.IGNORECASE)
+_BARE_SOURCEGRAPH_TOKEN = re.compile(r"\b[a-f0-9]{40}\b", re.IGNORECASE)
+
+
+def _mask_opaque_literal(match: re.Match[str]) -> str:
+    value = match["value"]
+    length = len(value)
+    entropy = log2(length) - sum(n * log2(n) for n in Counter(value).values()) / length
+    if entropy < 3.5:
+        return match[0]
+    return match["label"] + "[REDACTED]"
+
+
 _OMITTED_CREDENTIAL_TEXT = "[CREDENTIAL_CONTENT_REDACTED]"
 
 
@@ -378,6 +403,9 @@ def redact_text(value: str) -> str:
     for pattern, replacement in SENSITIVE_TEXT_PATTERNS:
         text = pattern.sub(replacement, text)
     text = ENCODED_JSON_RE.sub(redact_runner_bundle, text)
+    if _SOURCEGRAPH_TOKEN_TEXT.search(text):
+        text = _BARE_SOURCEGRAPH_TOKEN.sub("[REDACTED]", text)
+    text = _OPAQUE_LITERAL.sub(_mask_opaque_literal, text)
     return _OMITTED_CREDENTIAL_TEXT if _remaining_credential_content(text) else text
 
 
