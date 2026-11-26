@@ -793,8 +793,10 @@ def command_run(
 ) -> int:
     from . import push_retry
 
-    assert_private_repo_fn(args.remote)
     state_dir = Path(args.state_dir).expanduser()
+    if not getattr(args, "no_push", False):
+        push_retry.check_backoff(state_dir, Path(args.data_repo).expanduser())
+    assert_private_repo_fn(args.remote)
     source_root = Path(args.source_root).expanduser()
     repo = Path(args.data_repo).expanduser()
     quota_db = Path(args.quota_db).expanduser()
@@ -803,7 +805,7 @@ def command_run(
         wait_seconds=float(getattr(args, "wait_lock_seconds", 0.0) or 0.0),
     ):
         if not args.no_push:
-            push_retry.check_backoff(state_dir)
+            push_retry.check_backoff(state_dir, repo)
         if not args.no_push and push_retry.pending(repo, state_dir, run_fn):
             ensure_repo_fn(repo, args.remote)
             push_retry.push(repo, state_dir, git_ok_fn)

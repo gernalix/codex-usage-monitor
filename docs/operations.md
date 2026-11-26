@@ -30,3 +30,10 @@ snapshot. A normal Git push, including the pre-push secret check, has up to 20
 minutes. On failure the delay grows from five minutes to a maximum of six hours.
 Inspect the user unit journal for the reason if the backlog persists. Source
 files, local commits and the remote's normal fast-forward protection are preserved.
+
+When the installed Gitleaks hook rejects a specific outgoing tip for a possible
+credential, the publisher records its object ID in the private retry receipt.
+Subsequent timer ticks leave that history in quarantine, including after local
+commits are appended. Rebuild the rejected unpublished history under the publisher
+lock after preserving a private backup. The replacement goes through the normal
+private-remote and pre-push checks. The timer reports the hold without rescanning.

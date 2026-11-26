@@ -25,3 +25,22 @@ class PublisherRetryTests(unittest.TestCase):
                 push_retry.push(state, state, git)
             git.assert_called_with(["git", "push", "origin", "main"], state, timeout=1200)
             self.assertFalse((state / "push-retry.json").exists())
+
+    def test_guard_rejection_holds_descendants_until_history_is_replaced(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            tip = "ab" * 20
+            message = f"Gitleaks ha fermato il push. possibile credenziale nei commit verso {tip[:12]}."
+            git = Mock(side_effect=push_retry.legacy.PublisherError(message))
+            head = subprocess.CompletedProcess([], 0, stdout=tip)
+            ancestor = subprocess.CompletedProcess([], 0)
+            rewritten = subprocess.CompletedProcess([], 1)
+            with patch.object(push_retry.legacy, "run", side_effect=[head, ancestor, rewritten]):
+                with self.assertRaisesRegex(push_retry.legacy.PublisherError, "quarantined"):
+                    push_retry.push(state, state, git)
+                with self.assertRaisesRegex(push_retry.legacy.PublisherError, "quarantined"):
+                    push_retry.push(state, state, git)
+                git.side_effect = None
+                push_retry.push(state, state, git)
+            self.assertEqual(git.call_count, 2)
+            git.assert_called_with(["git", "push", "origin", "main"], state, timeout=1200)

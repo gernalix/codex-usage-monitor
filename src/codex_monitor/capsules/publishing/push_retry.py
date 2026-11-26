@@ -1,5 +1,6 @@
 """Retry an interrupted private publication before producing the next commit."""
 import json
+import re
 import subprocess
 import time
 
@@ -10,11 +11,22 @@ def _receipt(state):
     return state / "push-retry.json"
 
 
-def check_backoff(state):
+def check_backoff(state, repo):
     path = _receipt(state)
     try:
         receipt = json.loads(path.read_text())
     except FileNotFoundError:
+        return 0
+    rejected = receipt.get("rejected_tip")
+    if rejected:
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", rejected):
+            raise legacy.PublisherError("Invalid credential quarantine receipt")
+        history = legacy.run(["git", "merge-base", "--is-ancestor", rejected, "refs/heads/main"], repo)
+        if history.returncode != 1:
+            raise legacy.PublisherError("Publication quarantined by the credential check. "
+                                        "Review the unpublished history before retrying.")
+        # Replacing the rejected history releases the hold; the ordinary
+        # pre-push hook must still inspect the replacement in full.
         return 0
     remaining = receipt["retry_after"] - time.time()
     if remaining > 0:
@@ -23,7 +35,7 @@ def check_backoff(state):
 
 
 def push(repo, state, git_ok):
-    attempts = check_backoff(state) + 1
+    attempts = check_backoff(state, repo) + 1
     delay = min(21600, 300 * 2 ** min(attempts - 1, 7))
     path = _receipt(state)
     def record(delay_seconds):
@@ -34,6 +46,13 @@ def push(repo, state, git_ok):
     try:
         git_ok(["git", "push", "origin", "main"], repo, timeout=1200)
     except (legacy.PublisherError, OSError, subprocess.TimeoutExpired) as exc:
+        rejection = re.search(r"Gitleaks ha fermato il push\. possibile credenziale nei commit verso ([0-9a-f]{12})\.", str(exc))
+        if rejection:
+            head = legacy.run(["git", "rev-parse", "--verify", "refs/heads/main"], repo)
+            if head.returncode == 0 and head.stdout.strip().startswith(rejection[1]):
+                legacy.atomic_write(path, json.dumps({"attempts": attempts, "retry_after": 0,
+                                                      "rejected_tip": head.stdout.strip()}))
+                raise legacy.PublisherError("Credential check rejected the outgoing history; publication quarantined") from exc
         record(delay)
         raise legacy.PublisherError(f"Git publication failed; retry in {delay}s ({type(exc).__name__}): {exc}") from exc
     path.unlink()
