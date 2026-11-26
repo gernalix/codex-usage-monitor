@@ -73,6 +73,26 @@ class PromptCyclePublicationTests(unittest.TestCase):
             latest = json.loads((repo / "index/latest.json").read_text(encoding="utf-8"))
             self.assertEqual(latest["latest_prompt"]["path"], "prompts/583214/cycles/cycle-b")
 
+    def test_transcript_redacts_provider_tokens_across_records(self) -> None:
+        digest = "f9e813a7ca05132b6d2c" * 2
+        provider = "Source" + "graph"
+        cycles = self.cycles()
+        cycles[0]["events"] = [
+            {"role": "tool", "content_text": "reported value " + digest, "count": 2},
+            {"role": "assistant", "content_text": provider + " diagnostic"},
+        ]
+        cycles[1]["events"] = [{"role": "assistant", "content_text": "Git ref " + digest}]
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "repo"
+            repo.mkdir()
+            publisher.export_repo(repo, cycles, {7: cycles[0]["events"]}, Path(temporary) / "missing.sqlite")
+            affected = repo / "prompts/583214/cycles/cycle-a/transcript.jsonl"
+            rows = [json.loads(line) for line in affected.read_text().splitlines()]
+            self.assertEqual(rows[0], {"role": "tool", "content_text": "reported value [REDACTED]", "count": 2})
+            self.assertEqual(rows[1], cycles[0]["events"][1])
+            self.assertIn(digest, (repo / "prompts/583214/cycles/cycle-b/transcript.jsonl").read_text())
+            self.assertIn(digest, cycles[0]["events"][0]["content_text"])
+
     def test_missing_stable_layout_backfills_even_when_no_cycle_changed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

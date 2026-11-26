@@ -153,7 +153,14 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
-    atomic_write(path, "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows))
+    text = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows)
+    # The credential scanner considers the entire published fragment.
+    if archive.has_sourcegraph_context(text):
+        text = "".join(
+            json.dumps(archive.redact_bare_sourcegraph_tokens(row), ensure_ascii=False, sort_keys=True) + "\n"
+            for row in rows
+        )
+    atomic_write(path, text)
 
 
 def connect_state(state_dir: Path) -> sqlite3.Connection:
