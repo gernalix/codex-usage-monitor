@@ -16,6 +16,7 @@ from .legacy import (
     DEFAULT_SOURCE_ROOT,
     DEFAULT_STATE_DIR,
     PublisherError,
+    archive_prompt_metrics,
     assert_private_repo,
     atomic_write,
     build_parser,

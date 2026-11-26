@@ -35,7 +35,7 @@ def _summary(metrics: dict[str, Any]) -> dict[str, Any]:
     uncached = int(metrics.get("uncached_input_tokens") or 0)
     output = int(metrics.get("output_tokens") or 0)
     return {
-        "cycle_key": metrics.get("cycle_key"),
+        "cycle_key": published.archive_cycle_id(metrics),
         "status": str(metrics.get("status") or "UNKNOWN").upper(),
         "timestamp_start_utc": metrics.get("timestamp_start_utc"),
         "timestamp_end_utc": metrics.get("timestamp_end_utc"),

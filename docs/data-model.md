@@ -27,3 +27,11 @@ Diagnostic bundles sanitize disposable SQLite snapshots, including historical
 text cells, omit opaque blobs and remove old free pages before packaging.
 Schema, numeric metrics and original databases are preserved. Source archives
 remain private; no historical Git publication is automatically rewritten.
+
+## Published prompt cycle identity
+
+Published prompt metrics, prompt index rows, and the latest-prompt summary use
+`cycle_id` with the original stable cycle identifier. Readers accept the historical
+`cycle_key` name as a fallback. The publisher still uses `cycle_key` in its internal
+records and SQLite state. Neither the value nor the prompt-cycle directory name
+changes when the field is migrated.

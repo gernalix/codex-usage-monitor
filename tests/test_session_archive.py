@@ -62,6 +62,23 @@ class SessionArchiveTests(unittest.TestCase):
         self.assertEqual(archive_redaction.redact_text("adb pair 192.0.2.1:12345 123456"),
                          "adb pair 192.0.2.1:12345 [REDACTED]")
 
+    def test_curl_literal_basic_auth_is_redacted_but_references_survive(self) -> None:
+        synthetic = "fixture-password-27819"
+        userinfo = f"svc-test:{synthetic}"
+        url = "https://example.test"
+        for command in (
+            f"curl -u '{userinfo}' {url}",
+            f'curl --user="{userinfo}" {url}',
+            f"curl --user {userinfo} {url}",
+        ):
+            for _ in range(3):
+                saved = archive_redaction.redact_text(command)
+                self.assertNotIn(synthetic, saved)
+                self.assertEqual(archive_redaction.redact_text(saved), saved)
+                command = json.dumps(command)
+        reference = f'curl --user "${{USERNAME}}:${{PASSWORD}}" {url}'
+        self.assertEqual(archive_redaction.redact_text(reference), reference)
+
     def test_google_oauth_values_are_redacted_without_surrounding_command(self) -> None:
         for candidate in ("4/0A" + "x" * 40, "ya29." + "x" * 40):
             saved = archive_redaction.redact_obj({"output": candidate, "nested": ["value " + candidate]})

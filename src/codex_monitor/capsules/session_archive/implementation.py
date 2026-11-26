@@ -74,6 +74,7 @@ SENSITIVE_TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}\b"), "[OPENAI_KEY_REDACTED]"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"), "[GITHUB_TOKEN_REDACTED]"),
     (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"), "[GITHUB_TOKEN_REDACTED]"),
+    (re.compile(r"\bsgp_(?:(?:[a-f0-9]{16}|local)_)?[a-f0-9]{40}\b", re.I), "[REDACTED]"),
     (re.compile(r"\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b"), "[JWT_REDACTED]"),
     (re.compile(r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]{8,}"), r"\1[REDACTED]"),
     (re.compile(r'("(?:accessToken|sessionToken|idToken|refreshToken|token)"\s*:\s*")[^"]+(")', re.I), r"\1[REDACTED]\2"),
@@ -318,6 +319,13 @@ _SAFE_CREDENTIAL_VALUE = re.compile(
     rf'''^(?:(?:Basic|Bearer)\s+)?(?:"{_MARKER}"|'{_MARKER}')(?=\s*$|\s*[,}}\]]|\s+--[\w-]+(?:[\s=]|$))|^(?:(?:Basic|Bearer)\s+)?{_MARKER}(?=\s*$|\s+--[\w-]+(?:[\s=]|$))''',
     re.I,
 )
+_CURL_USER_CREDENTIAL = re.compile(
+    r'''\bcurl\b[^\r\n]*?[ \t](?:-u|--user)(?:=|[ \t]+)(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^ \t\r\n'"\\;|]+))''',
+    re.I,
+)
+_SHELL_VAR = re.compile(r"\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)")
+
+
 _OMITTED_CREDENTIAL_TEXT = "[CREDENTIAL_CONTENT_REDACTED]"
 
 
@@ -334,6 +342,12 @@ def _remaining_credential_content(text: str) -> bool:
         return True
     for match in re.finditer(r'''(?i)(?:https?://([^\s/<>"']+)@|[a-z][a-z0-9+.-]*://([^\s/@<>"']+:[^\s/<>"']*)@)''', inspected):
         if (match[1] or match[2]) != "[REDACTED]":
+            return True
+    command_text = re.sub(r"\\\r?\n", " ", inspected)
+    for match in _CURL_USER_CREDENTIAL.finditer(command_text):
+        userinfo = next(value for value in match.groups() if value is not None)
+        username, separator, password = userinfo.partition(":")
+        if separator and not (_SHELL_VAR.fullmatch(username) and _SHELL_VAR.fullmatch(password)):
             return True
     return any(not _SAFE_CREDENTIAL_VALUE.match(match[1])
                for pattern in (_CREDENTIAL_CONTEXT, _CREDENTIAL_FLAG_CONTEXT)

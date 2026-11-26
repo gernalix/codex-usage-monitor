@@ -667,6 +667,13 @@ def assert_private_repo(remote: str) -> None:
         raise PublisherError("BLOCKED_REPO_PRIVACY_UNVERIFIED")
 
 
+def archive_prompt_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    """Project an internal cycle record onto the published archive schema."""
+    exported = dict(metrics)
+    exported["cycle_id"] = exported.pop("cycle_key")
+    return exported
+
+
 def prompt_dir(metrics: dict[str, Any]) -> Path:
     prompt_id = metrics.get("prompt_id")
     if prompt_id:
@@ -728,7 +735,7 @@ def export_repo(repo: Path, cycles: list[dict[str, Any]], chat_events_by_id: dic
     for cycle in cycles:
         metrics = cycle["metrics"]
         rel = prompt_dir(metrics)
-        write_json(repo / rel / "metrics.json", metrics)
+        write_json(repo / rel / "metrics.json", archive_prompt_metrics(metrics))
         write_jsonl(repo / rel / "transcript.jsonl", cycle["events"])
         if metrics.get("prompt_id"):
             stale = repo / "prompts/unassigned" / str(metrics["cycle_key"])
@@ -738,7 +745,7 @@ def export_repo(repo: Path, cycles: list[dict[str, Any]], chat_events_by_id: dic
             {
                 "prompt_id": metrics.get("prompt_id"),
                 "chat_id": metrics["chat_id"],
-                "cycle_key": metrics["cycle_key"],
+                "cycle_id": metrics["cycle_key"],
                 "native_session_id": metrics["native_session_id"],
                 "timestamp_end_utc": metrics.get("timestamp_end_utc"),
                 "status": metrics.get("status"),
@@ -755,7 +762,7 @@ def export_repo(repo: Path, cycles: list[dict[str, Any]], chat_events_by_id: dic
         write_jsonl(repo / "chats" / str(chat_id) / "transcript.jsonl", chat_events_by_id.get(chat_id, []))
         chat_rows.append({"chat_id": chat_id, "native_session_id": metrics["native_session_id"], "cycle_count": metrics["cycle_count"], "prompt_ids": metrics["prompt_ids"], "path": f"chats/{chat_id}"})
     quota_rows = quota_index(quota_db)
-    write_jsonl(repo / "index/prompts.jsonl", sorted(prompt_rows, key=lambda r: (r.get("timestamp_end_utc") or "", str(r.get("cycle_key")))))
+    write_jsonl(repo / "index/prompts.jsonl", sorted(prompt_rows, key=lambda r: (r.get("timestamp_end_utc") or "", str(r.get("cycle_id")))))
     write_jsonl(repo / "index/chats.jsonl", chat_rows)
     write_jsonl(repo / "index/quota.jsonl", quota_rows)
     write_json(

@@ -373,8 +373,10 @@ def _remove_reassigned_cycle_dirs(repo: Path, cycles: list[dict[str, Any]]) -> i
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(row, dict) and row.get("cycle_key") and row.get("path"):
-            previous[str(row["cycle_key"])] = str(row["path"])
+        if isinstance(row, dict) and row.get("path"):
+            cycle_id = row.get("cycle_id") or row.get("cycle_key")
+            if cycle_id:
+                previous[str(cycle_id)] = str(row["path"])
 
     removed = 0
     for cycle in cycles:
@@ -421,7 +423,7 @@ def export_repo(
         rel = _stable_prompt_dir(metrics)
         prompt_id = metrics.get("prompt_id")
         if prompt_id:
-            _base.write_json(repo / rel / "metrics.json", metrics)
+            _base.write_json(repo / rel / "metrics.json", _base.archive_prompt_metrics(metrics))
             _base.write_jsonl(repo / rel / "transcript.jsonl", cycle["events"])
             prompt_key = str(prompt_id)
             previous = latest_by_prompt.get(prompt_key)
@@ -436,7 +438,7 @@ def export_repo(
             {
                 "prompt_id": prompt_id,
                 "chat_id": metrics["chat_id"],
-                "cycle_key": metrics["cycle_key"],
+                "cycle_id": metrics["cycle_key"],
                 "native_session_id": metrics["native_session_id"],
                 "timestamp_end_utc": metrics.get("timestamp_end_utc"),
                 "status": metrics.get("status"),
@@ -449,12 +451,12 @@ def export_repo(
     for prompt_id, selected in latest_by_prompt.items():
         cycle = selected["cycle"]
         flat = Path("prompts") / prompt_id
-        _base.write_json(repo / flat / "metrics.json", cycle["metrics"])
+        _base.write_json(repo / flat / "metrics.json", _base.archive_prompt_metrics(cycle["metrics"]))
         _base.write_jsonl(repo / flat / "transcript.jsonl", cycle["events"])
 
     sorted_rows = sorted(
         prompt_rows,
-        key=lambda row: (row.get("timestamp_end_utc") or "", str(row.get("cycle_key"))),
+        key=lambda row: (row.get("timestamp_end_utc") or "", str(row.get("cycle_id"))),
     )
     _base.write_jsonl(repo / "index/prompts.jsonl", sorted_rows)
 

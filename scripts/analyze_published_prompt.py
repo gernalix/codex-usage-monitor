@@ -25,6 +25,10 @@ _AGGREGATE_KEYS = (
 _TOOL_CALL_SUBTYPES = {"function_call", "custom_tool_call"}
 
 
+def archive_cycle_id(metrics: dict[str, Any]) -> Any:
+    return metrics.get("cycle_id") or metrics.get("cycle_key")
+
+
 def _load_json(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -144,7 +148,7 @@ def _historical_prompt_cycles(root: Path, prompt_id: str) -> list[dict[str, Any]
             continue
         if not isinstance(metrics, dict) or str(metrics.get("prompt_id") or "") != str(prompt_id):
             continue
-        cycle_key = str(metrics.get("cycle_key") or f"commit:{commit}")
+        cycle_key = str(archive_cycle_id(metrics) or f"commit:{commit}")
         if cycle_key in seen:
             continue
         seen.add(cycle_key)
@@ -165,7 +169,7 @@ def _merge_cycles(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for group in groups:
         for cycle in group:
             metrics = cycle["metrics"]
-            key = str(metrics.get("cycle_key") or f"fallback:{metrics.get('timestamp_end_utc')}:{metrics.get('tool_call_count')}")
+            key = str(archive_cycle_id(metrics) or f"fallback:{metrics.get('timestamp_end_utc')}:{metrics.get('tool_call_count')}")
             if key in seen:
                 continue
             seen.add(key)
@@ -319,8 +323,8 @@ def analyze_published_prompt(root: Path, prompt_id: str) -> dict[str, Any]:
     selected_from_history = bool(
         selected
         and selected_source == "git_history"
-        and str(selected["metrics"].get("cycle_key") or "")
-        != str(current_metrics.get("cycle_key") or "")
+        and str(archive_cycle_id(selected["metrics"]) or "")
+        != str(archive_cycle_id(current_metrics) or "")
     )
     metrics = selected["metrics"] if selected else current_metrics
     events = selected["events"] if selected else current_events
@@ -346,9 +350,9 @@ def analyze_published_prompt(root: Path, prompt_id: str) -> dict[str, Any]:
             "selected_from_git_history": selected_from_history,
             "selected_source": selected_source,
             "selected_history_commit": selected.get("commit") if selected else None,
-            "current_cycle_key": current_metrics.get("cycle_key"),
-            "selected_cycle_key": metrics.get("cycle_key"),
-            "terminal_cycle_key": terminal_metrics.get("cycle_key"),
+            "current_cycle_key": archive_cycle_id(current_metrics),
+            "selected_cycle_key": archive_cycle_id(metrics),
+            "terminal_cycle_key": archive_cycle_id(terminal_metrics),
             "transcript_available": bool(events),
             "native_tool_input_event_count": native_tool_input_events,
             "native_session_dump_used": native_tool_input_events > 0,
@@ -386,21 +390,21 @@ def analyze_published_prompt(root: Path, prompt_id: str) -> dict[str, Any]:
                 "note": "multiple cycles share this PROMPT_ID; primary work cycle is selected by work performed",
             }
         )
-    if selected and str(metrics.get("cycle_key") or "") != str(current_metrics.get("cycle_key") or ""):
+    if selected and str(archive_cycle_id(metrics) or "") != str(archive_cycle_id(current_metrics) or ""):
         result.setdefault("findings", []).append(
             {
                 "code": "latest_prompt_files_overwrote_substantive_cycle",
-                "current_cycle_key": current_metrics.get("cycle_key"),
-                "selected_cycle_key": metrics.get("cycle_key"),
+                "current_cycle_key": archive_cycle_id(current_metrics),
+                "selected_cycle_key": archive_cycle_id(metrics),
                 "note": "analysis selected the primary work cycle instead of the latest flat alias",
             }
         )
-    if selected and terminal and str(metrics.get("cycle_key") or "") != str(terminal_metrics.get("cycle_key") or ""):
+    if selected and terminal and str(archive_cycle_id(metrics) or "") != str(archive_cycle_id(terminal_metrics) or ""):
         result.setdefault("findings", []).append(
             {
                 "code": "terminal_followup_not_primary_work_cycle",
-                "primary_cycle_key": metrics.get("cycle_key"),
-                "terminal_cycle_key": terminal_metrics.get("cycle_key"),
+                "primary_cycle_key": archive_cycle_id(metrics),
+                "terminal_cycle_key": archive_cycle_id(terminal_metrics),
             }
         )
     return result

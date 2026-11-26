@@ -65,7 +65,10 @@ class PromptCyclePublicationTests(unittest.TestCase):
             self.assertTrue((repo / "prompts/583214/cycles/cycle-b/metrics.json").is_file())
 
             flat = json.loads((repo / "prompts/583214/metrics.json").read_text(encoding="utf-8"))
-            self.assertEqual(flat["cycle_key"], "cycle-b")
+            self.assertEqual(flat["cycle_id"], "cycle-b")
+            self.assertNotIn("cycle_key", flat)
+            self.assertEqual([row["cycle_id"] for row in index_rows], ["cycle-a", "cycle-b"])
+            self.assertTrue(all("cycle_key" not in row for row in index_rows))
 
             latest = json.loads((repo / "index/latest.json").read_text(encoding="utf-8"))
             self.assertEqual(latest["latest_prompt"]["path"], "prompts/583214/cycles/cycle-b")
