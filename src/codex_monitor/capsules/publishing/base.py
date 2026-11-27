@@ -629,6 +629,7 @@ def command_run(
     parse_session_fn=None,
     export_repo_fn=None,
     send_batch_telegram_fn=None,
+    verified_transcripts=None,
 ) -> int:
     global _should_export, _notify_cycle_objects, _guard_candidate_cycles
     _should_export = False
@@ -650,6 +651,7 @@ def command_run(
             git_ok_fn=git_ok,
             utc_stamp_fn=utc_stamp,
             source_generation=SOURCE_SCAN_GENERATION,
+            verified_transcripts=verified_transcripts,
         )
     )
     if result == 0 and _guard_candidate_cycles:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from functools import partial
 import re
 import shutil
 from pathlib import Path
@@ -9,6 +10,7 @@ import sqlite3
 from typing import Any
 
 from . import base as _base
+from .verified_transcripts import VerifiedTranscripts, rules_digest
 from .base import (
     ATTACHMENTS_ROOT,
     DEFAULT_DATA_REMOTE,
@@ -242,8 +244,9 @@ def _recover_completed_goal_aborts(
 def _legacy_parse_session_with_goal_recovery(
     path: Path,
     con: sqlite3.Connection,
+    *, transcripts: VerifiedTranscripts | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    cycles, events = _ORIGINAL_LEGACY_PARSE_SESSION(path, con)
+    cycles, events = _ORIGINAL_LEGACY_PARSE_SESSION(path, con, transcripts=transcripts)
     for cycle in _recover_completed_goal_aborts(path, con, events):
         cycle_key = str(cycle["metrics"].get("cycle_key") or "")
         if not any(str(existing["metrics"].get("cycle_key") or "") == cycle_key for existing in cycles):
@@ -258,11 +261,11 @@ def _legacy_parse_session_with_goal_recovery(
     return cycles, events
 
 
-def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def parse_session(path: Path, con: sqlite3.Connection, *, transcripts: VerifiedTranscripts | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     cycles, events = _BASE_PARSE_SESSION(
         path,
         con,
-        legacy_parse_session_fn=_legacy_parse_session_with_goal_recovery,
+        legacy_parse_session_fn=partial(_legacy_parse_session_with_goal_recovery, transcripts=transcripts),
     )
     last_prompt_id: str | None = None
     last_status: str | None = None
@@ -472,7 +475,18 @@ def export_repo(
 
 
 def command_run(args) -> int:
-    return _base.command_run(args, parse_session_fn=parse_session, export_repo_fn=export_repo)
+    repo = Path(args.data_repo).expanduser()
+    verified = VerifiedTranscripts(repo, _base.SOURCE_SCAN_GENERATION + ":" + rules_digest())
+
+    def render(*args):
+        if verified.repair_export:
+            _base.mark_export_required()
+        return export_repo(*args)
+
+    return _base.command_run(
+        args, parse_session_fn=partial(parse_session, transcripts=verified),
+        export_repo_fn=render, verified_transcripts=verified,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

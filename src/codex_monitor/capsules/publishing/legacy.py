@@ -22,6 +22,7 @@ from typing import Any
 
 from codex_monitor.capsules.session_archive import api as archive
 from codex_monitor.capsules.quota import api as quota
+from .verified_transcripts import VerifiedTranscripts
 
 
 VERSION = "2026.09.05"
@@ -178,8 +179,12 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     _write_export(path, json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
 
 
+def encode_jsonl(rows: list[dict[str, Any]]) -> str:
+    return "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows)
+
+
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
-    text = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows)
+    text = encode_jsonl(rows)
     # The credential scanner considers the entire published fragment.
     if archive.has_sourcegraph_context(text):
         text = "".join(
@@ -198,6 +203,10 @@ def connect_state(state_dir: Path) -> sqlite3.Connection:
     con.execute("PRAGMA foreign_keys=ON")
     con.executescript(
         """
+        CREATE TABLE IF NOT EXISTS verified_transcripts (
+            source_path TEXT PRIMARY KEY, generation TEXT NOT NULL, source_hash TEXT NOT NULL,
+            chat_id INTEGER NOT NULL UNIQUE, export_size INTEGER NOT NULL, export_hash TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS session_chats (
             chat_id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT NOT NULL UNIQUE,
@@ -520,7 +529,7 @@ def get_chat_id(con: sqlite3.Connection, session_id: str) -> int:
         raise
 
 
-def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def parse_session(path: Path, con: sqlite3.Connection, *, transcripts: VerifiedTranscripts | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     session_id = archive.first_uuid_from_path(path) or path.stem
     chat_id: int | None = None
     current: dict[str, Any] | None = None
@@ -528,7 +537,15 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
     chat_events: list[dict[str, Any]] = []
     final_by_turn: dict[str, str] = {}
     session_cwd: str | None = None
-    raw_lines = path.read_text(encoding="utf-8", errors="replace")
+    texts = None
+    if transcripts is None:
+        raw_lines = path.read_text(encoding="utf-8", errors="replace")
+    else:
+        raw = path.read_bytes()
+        source_hash = hashlib.sha256(raw).hexdigest()
+        raw_lines = raw.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+        del raw
+        texts = transcripts.load(con, path, source_hash)
     sha = digest_text(raw_lines)
 
     for line_no, line in enumerate(raw_lines.splitlines(), 1):
@@ -583,7 +600,8 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
             "subtype": ptype or None,
             "role": payload.get("role") if isinstance(payload.get("role"), str) else None,
             "tool_name": payload.get("name") if ptype in {"function_call", "custom_tool_call"} else None,
-            "content_text": archive.redact_text(extract_output_text(payload)),
+            "content_text": (texts[len(chat_events)] if texts is not None
+                             else archive.redact_text(extract_output_text(payload))),
         }
         chat_events.append(event)
         if current is not None:
@@ -601,7 +619,7 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
                 if name == "apply_patch":
                     current["repo_write_paths"].extend(payload_paths)
             if ptype == "message" and payload.get("role") == "user" and not current["prompt_text"]:
-                current["prompt_text"] = archive.redact_text(extract_output_text(payload))
+                current["prompt_text"] = event["content_text"]
                 current["prompt_id"] = prompt_id_from_text(current["prompt_text"])
             if top == "event_msg" and ptype == "token_count":
                 current["token"] = token_usage(payload)
@@ -613,7 +631,7 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
             if ptype == "message" and payload.get("role") == "assistant" and payload.get("phase") == "final_answer":
                 turn_id = ((payload.get("internal_chat_message_metadata_passthrough") or {}).get("turn_id"))
                 if isinstance(turn_id, str):
-                    final_by_turn[turn_id] = archive.redact_text(extract_output_text(payload))
+                    final_by_turn[turn_id] = event["content_text"]
         if top == "event_msg" and ptype == "task_complete" and current is not None:
             turn_id = str(payload.get("turn_id") or current["turn_id"])
             final = archive.redact_text(str(payload.get("last_agent_message") or final_by_turn.get(turn_id) or ""))
@@ -664,6 +682,12 @@ def parse_session(path: Path, con: sqlite3.Connection) -> tuple[list[dict[str, A
             }
             cycles.append({"metrics": metrics, "events": current["events"], "final_event_id": f"{path}:{line_no}", "source_sha256": sha})
             current = None
+    if transcripts is not None and texts is None and chat_id is not None and cycles:
+        # Bind only the bytes derived here. Never learn an export hash from disk.
+        text = encode_jsonl(chat_events)
+        if not archive.has_sourcegraph_context(text) or all(
+                archive.redact_bare_sourcegraph_tokens(row) == row for row in chat_events):
+            transcripts.remember(path, source_hash, chat_id, text.encode("utf-8"))
     return cycles, chat_events
 
 
@@ -835,6 +859,7 @@ def command_run(
     git_ok_fn=git_ok,
     utc_stamp_fn=utc_stamp,
     source_generation: str | None = None,
+    verified_transcripts: VerifiedTranscripts | None = None,
 ) -> int:
     from . import push_retry
 
@@ -857,19 +882,24 @@ def command_run(
         with connect_state_fn(state_dir) as con:
             source_paths = sorted(source_root.glob("**/*.jsonl"))
             source_snapshot = _source_snapshot(source_paths)
+
+            def scan_generation():
+                return verified_transcripts.snapshot_generation() if verified_transcripts else source_generation
+
+            initial_generation = scan_generation()
             if source_generation and source_snapshot is not None and not _publisher_has_pending_state(con):
                 exact_match = _source_snapshot_matches(
-                    state_dir, source_generation, source_snapshot
+                    state_dir, initial_generation, source_snapshot
                 )
                 nonterminal_append = (
                     not exact_match
                     and _source_snapshot_can_advance_without_rescan(
-                        state_dir, source_generation, source_snapshot
+                        state_dir, initial_generation, source_snapshot
                     )
                 )
                 if exact_match or nonterminal_append:
                     if nonterminal_append:
-                        _write_source_snapshot(state_dir, source_generation, source_snapshot)
+                        _write_source_snapshot(state_dir, initial_generation, source_snapshot)
                     counts = con.execute(
                         "SELECT COUNT(*) cycles, SUM(prompt_id IS NOT NULL) prompt_ids FROM cycles"
                     ).fetchone()
@@ -913,6 +943,11 @@ def command_run(
                     pending_cycles.append(cycle)
             ensure_repo_fn(repo, args.remote)
             export_repo_fn(repo, cycles, chat_events, quota_db)
+            reuse_counts = {}
+            if verified_transcripts is not None:
+                verified_transcripts.confirm(con)
+                reuse_counts = {"transcripts_checked": verified_transcripts.parsed,
+                                "transcripts_reused": verified_transcripts.reused}
             status = run_fn(["git", "status", "--short"], repo).stdout
             if not status.strip():
                 current_commit = run_fn(["git", "rev-parse", "HEAD"], repo).stdout.strip()
@@ -949,20 +984,20 @@ def command_run(
                     con.execute("UPDATE cycles SET telegram_sent=1 WHERE cycle_key IN (%s)" % ",".join("?" for _ in retry_keys), tuple(retry_keys))
                     con.commit()
                     if source_generation and source_snapshot is not None:
-                        _write_source_snapshot(state_dir, source_generation, source_snapshot)
-                    print(json.dumps({"status": "telegram_retried", "chats": len({c["metrics"]["chat_id"] for c in retry_cycles}), "cycles": len(retry_cycles)}, sort_keys=True))
+                        _write_source_snapshot(state_dir, scan_generation(), source_snapshot)
+                    print(json.dumps({**reuse_counts, "status": "telegram_retried", "chats": len({c["metrics"]["chat_id"] for c in retry_cycles}), "cycles": len(retry_cycles)}, sort_keys=True))
                     return 0
                 if source_generation and source_snapshot is not None:
-                    _write_source_snapshot(state_dir, source_generation, source_snapshot)
-                print(json.dumps({"status": "noop", "chats": len(chat_events), "cycles": len(cycles), "prompt_ids": len({c["metrics"].get("prompt_id") for c in cycles if c["metrics"].get("prompt_id")})}, sort_keys=True))
+                    _write_source_snapshot(state_dir, scan_generation(), source_snapshot)
+                print(json.dumps({**reuse_counts, "status": "noop", "chats": len(chat_events), "cycles": len(cycles), "prompt_ids": len({c["metrics"].get("prompt_id") for c in cycles if c["metrics"].get("prompt_id")})}, sort_keys=True))
                 return 0
             if args.no_push:
-                print(json.dumps({"status": "dry_run", "changed": status.strip().splitlines()}, sort_keys=True))
+                print(json.dumps({**reuse_counts, "status": "dry_run", "changed": status.strip().splitlines()}, sort_keys=True))
                 return 0
             git_ok_fn(["git", "add", "index", "prompts", "chats", "metadata"], repo)
             status = run_fn(["git", "status", "--short"], repo).stdout
             if not status.strip():
-                print(json.dumps({"status": "noop"}, sort_keys=True))
+                print(json.dumps({**reuse_counts, "status": "noop"}, sort_keys=True))
                 return 0
             changed_cycle_keys = {c["metrics"]["cycle_key"] for c in pending_cycles}
             if len(pending_cycles) == 1 and pending_cycles[0]["metrics"].get("prompt_id"):
@@ -994,8 +1029,8 @@ def command_run(
                 con.execute("UPDATE cycles SET telegram_sent=1 WHERE cycle_key IN (%s)" % ",".join("?" for _ in changed_cycle_keys), tuple(changed_cycle_keys))
                 con.commit()
             if source_generation and source_snapshot is not None:
-                _write_source_snapshot(state_dir, source_generation, source_snapshot)
-            print(json.dumps({"status": "published", "commit": commit, "chats": len(chat_events), "cycles": len(cycles), "published_cycles": len(pending_cycles)}, sort_keys=True))
+                _write_source_snapshot(state_dir, scan_generation(), source_snapshot)
+            print(json.dumps({**reuse_counts, "status": "published", "commit": commit, "chats": len(chat_events), "cycles": len(cycles), "published_cycles": len(pending_cycles)}, sort_keys=True))
             return 0
 
 
