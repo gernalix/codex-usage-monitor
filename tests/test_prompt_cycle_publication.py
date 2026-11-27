@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
+from unittest.mock import patch
 from pathlib import Path
 import tempfile
 import unittest
@@ -35,6 +38,43 @@ class PromptCyclePublicationTests(unittest.TestCase):
                 "events": [{"content_text": "second"}],
             },
         ]
+
+    def test_repeat_export_preserves_all_identical_files_including_aliases_and_indexes(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(publisher._base, "_should_export", True):
+            repo = Path(temp)
+            cycles = self.cycles()
+            cycles.reverse()  # The latest alias follows the timestamp, independent of input order.
+            cycles[0]["events"][0]["content_text"] = "città" * 18000
+            cycle = dict(cycles[0], metrics={**cycles[0]["metrics"], "prompt_id": None, "cycle_key": "unassigned"})
+            cycles.append(cycle)
+            quota = repo / "missing.sqlite"
+            publisher.export_repo(repo, cycles, {}, quota)
+            files = [p for p in repo.rglob("*") if p.is_file()]
+            before = {p: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in files}
+            publisher.export_repo(repo, cycles, {}, quota)
+            self.assertEqual(before, {p: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in files})
+            alias = repo / "prompts/583214/transcript.jsonl"
+            expected = before[alias][2]
+            alias.write_bytes(expected.replace(b"\n", b"\r\n"))
+            publisher.export_repo(repo, cycles, {}, quota)
+            self.assertEqual(alias.read_bytes(), expected)
+
+    def test_export_restores_private_independent_regular_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            path = repo / "record.json"
+            publisher._base.write_json(path, {"id": 1})
+            sibling = repo / "sibling"
+            os.link(path, sibling)
+            publisher._base.write_json(path, {"id": 1})
+            self.assertNotEqual(path.stat().st_ino, sibling.stat().st_ino)
+            path.unlink()
+            path.symlink_to(sibling)
+            publisher._base.write_json(path, {"id": 1})
+            self.assertFalse(path.is_symlink())
+            path.chmod(0o644)
+            publisher._base.write_json(path, {"id": 1})
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
     def test_same_prompt_id_preserves_each_cycle_and_flat_latest_alias(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

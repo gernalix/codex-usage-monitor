@@ -23,6 +23,12 @@ runtime manifest. A running process retains its startup credentials; a file
 prepared for a later restart is not evidence of a completed consumer cutover.
 Native rollouts and raw archive copies stay private and local.
 
+The usage publisher renders the complete export with its usual redaction. It
+compares the resulting bytes with each private regular output file before
+replacing it. Identical files retain their inode and modification time. Each
+assigned prompt's flat alias contains the latest cycle. Changed files retain
+atomic replacement and the regular publication hook.
+
 The usage and chat publishers keep an interrupted push in
 `push-retry.json` under their existing state directory and share their existing lock.
 The next eligible invocation retries the committed data before exporting another

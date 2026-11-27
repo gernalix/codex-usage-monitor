@@ -13,6 +13,7 @@ import re
 import shutil
 import sqlite3
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -148,8 +149,33 @@ def atomic_write(path: Path, text: str) -> None:
             pass
 
 
+def _write_export(path: Path, text: str) -> None:
+    """Keep a private, byte-identical export in place after all rendering and redaction."""
+    def open_existing(name: str, flags: int) -> int:
+        return os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK)
+
+    try:
+        with open(path, "rb", opener=open_existing) as current:
+            info = os.fstat(current.fileno())
+            if (stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600
+                    and info.st_uid == os.geteuid() and info.st_nlink == 1
+                    and info.st_size >= len(text)):
+                for offset in range(0, len(text), 65536):
+                    chunk = text[offset:offset + 65536].encode("utf-8")
+                    if current.read(len(chunk)) != chunk:
+                        break
+                else:
+                    if not current.read(1):
+                        after = path.lstat()
+                        if os.path.samestat(info, after) and info.st_ctime_ns == after.st_ctime_ns:
+                            return
+    except OSError:
+        pass
+    atomic_write(path, text)
+
+
 def write_json(path: Path, payload: dict[str, Any]) -> None:
-    atomic_write(path, json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+    _write_export(path, json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -160,7 +186,7 @@ def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
             json.dumps(archive.redact_bare_sourcegraph_tokens(row), ensure_ascii=False, sort_keys=True) + "\n"
             for row in rows
         )
-    atomic_write(path, text)
+    _write_export(path, text)
 
 
 def connect_state(state_dir: Path) -> sqlite3.Connection:
@@ -727,7 +753,8 @@ def quota_index(quota_db: Path) -> list[dict[str, Any]]:
         return [archive.redact_obj(dict(row)) for row in con.execute("SELECT * FROM quota_overview ORDER BY acquired_at_utc DESC LIMIT 500")]
 
 
-def export_repo(repo: Path, cycles: list[dict[str, Any]], chat_events_by_id: dict[int, list[dict[str, Any]]], quota_db: Path) -> None:
+def export_repo(repo: Path, cycles: list[dict[str, Any]], chat_events_by_id: dict[int, list[dict[str, Any]]], quota_db: Path,
+                *, stable_rows: list[dict[str, Any]] | None = None) -> None:
     repo.joinpath("metadata").mkdir(parents=True, exist_ok=True)
     write_json(
         repo / "metadata/schema.json",
@@ -738,16 +765,20 @@ def export_repo(repo: Path, cycles: list[dict[str, Any]], chat_events_by_id: dic
             "redaction": "codex_session_archive.redact_text/redact_obj",
         },
     )
-    prompt_rows = []
+    # When stable_rows is supplied, the cycle-aware caller owns assigned paths and aliases.
+    prompt_rows = [] if stable_rows is None else stable_rows
     for cycle in cycles:
         metrics = cycle["metrics"]
         rel = prompt_dir(metrics)
-        write_json(repo / rel / "metrics.json", archive_prompt_metrics(metrics))
-        write_jsonl(repo / rel / "transcript.jsonl", cycle["events"])
+        if stable_rows is None or not metrics.get("prompt_id"):
+            write_json(repo / rel / "metrics.json", archive_prompt_metrics(metrics))
+            write_jsonl(repo / rel / "transcript.jsonl", cycle["events"])
         if metrics.get("prompt_id"):
             stale = repo / "prompts/unassigned" / str(metrics["cycle_key"])
             if stale.exists():
                 shutil.rmtree(stale)
+        if stable_rows is not None:
+            continue
         prompt_rows.append(
             {
                 "prompt_id": metrics.get("prompt_id"),

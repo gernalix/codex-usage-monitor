@@ -412,8 +412,8 @@ def export_repo(
     """
     reassigned_removed = _remove_reassigned_cycle_dirs(repo, cycles)
     migration_needed = _stable_layout_missing(repo, cycles) or bool(reassigned_removed)
-    _BASE_EXPORT_REPO(repo, cycles, chat_events_by_id, quota_db)
-    if not _base.export_required() and not migration_needed:
+    full_export = _base.export_required()
+    if not full_export and not migration_needed:
         return
 
     prompt_rows: list[dict[str, Any]] = []
@@ -458,6 +458,9 @@ def export_repo(
         prompt_rows,
         key=lambda row: (row.get("timestamp_end_utc") or "", str(row.get("cycle_id"))),
     )
+    if full_export:
+        _BASE_EXPORT_REPO(repo, cycles, chat_events_by_id, quota_db, stable_rows=sorted_rows)
+        return
     _base.write_jsonl(repo / "index/prompts.jsonl", sorted_rows)
 
     latest_path = repo / "index/latest.json"

@@ -608,11 +608,12 @@ def parse_session(
     return cycles, events
 
 
-def export_repo(repo: Path, cycles: list[dict[str, Any]], chat_events_by_id: dict[int, list[dict[str, Any]]], quota_db: Path) -> None:
+def export_repo(repo: Path, cycles: list[dict[str, Any]], chat_events_by_id: dict[int, list[dict[str, Any]]], quota_db: Path,
+                *, stable_rows: list[dict[str, Any]] | None = None) -> None:
     # Do not create a Git commit just because an unfinished rollout appended events.
     if not _should_export:
         return
-    _legacy_export_repo(repo, cycles, chat_events_by_id, quota_db)
+    _legacy_export_repo(repo, cycles, chat_events_by_id, quota_db, stable_rows=stable_rows)
 
 
 def send_batch_telegram(cycles: list[dict[str, Any]], dry_run: bool) -> bool:
