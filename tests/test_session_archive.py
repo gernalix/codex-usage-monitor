@@ -19,6 +19,12 @@ def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
 
 
 class AssertionRedactionTests(unittest.TestCase):
+    def test_redaction_keeps_unicode_and_encoded_credential_checks(self):
+        fake_token = "abc1" * 10
+        self.assertEqual(archive_redaction.redact_text("ſgp_" + fake_token), "[REDACTED]")
+        escaped_url = r"https:\/\/example\u003aplaceholder\u0040example.test"
+        self.assertEqual(archive_redaction.redact_text(escaped_url), "[CREDENTIAL_CONTENT_REDACTED]")
+
     def test_assertion_and_unittest_diff_hide_high_entropy_value(self):
         candidate = "a1b2" * 10
         output = f"AssertionError: '{candidate}' != 'fixture'\n- {candidate}\n+ fixture\n"

@@ -53,33 +53,35 @@ SENSITIVE_KEY_RE = re.compile(
     r"(token|secret|password|passwd|authorization|credentials?|cookie|private[_-]?key|api[_-]?key|access[_-]?key|refresh[_-]?token|session[_-]?token|id[_-]?token)",
     re.I,
 )
-SENSITIVE_TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r'''(https?://)[^\s/<>"']+@''', re.I), r"\1[REDACTED]@"),
-    (re.compile(r'''([a-z][a-z0-9+.-]*://)[^\s/@<>"']+:[^\s/<>"']*@''', re.I), r"\1[REDACTED]@"),
-    (re.compile(r"(?i)(\b(?:proxy-)?authorization\s*:\s*Basic\s+)[A-Za-z0-9+/=]+"), r"\1[REDACTED]"),
+# Each third field is a literal required by its own regex (including with re.I).
+# The regex still decides what is redacted when that literal is present.
+SENSITIVE_TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str, str | None], ...] = (
+    (re.compile(r'''(https?://)[^\s/<>"']+@''', re.I), r"\1[REDACTED]@", '@'),
+    (re.compile(r'''([a-z][a-z0-9+.-]*://)[^\s/@<>"']+:[^\s/<>"']*@''', re.I), r"\1[REDACTED]@", '@'),
+    (re.compile(r"(?i)(\b(?:proxy-)?authorization\s*:\s*Basic\s+)[A-Za-z0-9+/=]+"), r"\1[REDACTED]", ':'),
     # Shell transcripts can contain OAuth codes and short pairing PINs. Match
     # complete flag names, also through JSON-escaped quotes, without hiding
     # ordinary --code-file/--token-count arguments or unrelated source code.
-    (re.compile(r'''((?<![\w-])--(?:code|pin|password|passwd|token|api[-_]?key|secret|cookie|authorization|credential)(?:=|[ \t]+))(\\*["'])(.*?)\2''', re.I), r"\1\2[REDACTED]\2"),
-    (re.compile(r'''((?<![\w-])--(?:code|pin|password|passwd|token|api[-_]?key|secret|cookie|authorization|credential)(?:=|[ \t]+)(?:\\*["'])?)(?!-)[^\s"'\\;&|<>]+''', re.I), r"\1[REDACTED]"),
-    (re.compile(r"(\badb\s+pair\s+\S+\s+)\d{6}\b", re.I), r"\1[REDACTED]"),
-    (re.compile(r"\b4/0A[A-Za-z0-9_-]{20,}"), "[GOOGLE_OAUTH_CODE_REDACTED]"),
-    (re.compile(r"\bya29\.[A-Za-z0-9._~-]{15,}"), "[GOOGLE_ACCESS_TOKEN_REDACTED]"),
+    (re.compile(r'''((?<![\w-])--(?:code|pin|password|passwd|token|api[-_]?key|secret|cookie|authorization|credential)(?:=|[ \t]+))(\\*["'])(.*?)\2''', re.I), r"\1\2[REDACTED]\2", '--'),
+    (re.compile(r'''((?<![\w-])--(?:code|pin|password|passwd|token|api[-_]?key|secret|cookie|authorization|credential)(?:=|[ \t]+)(?:\\*["'])?)(?!-)[^\s"'\\;&|<>]+''', re.I), r"\1[REDACTED]", '--'),
+    (re.compile(r"(\badb\s+pair\s+\S+\s+)\d{6}\b", re.I), r"\1[REDACTED]", None),
+    (re.compile(r"\b4/0A[A-Za-z0-9_-]{20,}"), "[GOOGLE_OAUTH_CODE_REDACTED]", '4/0A'),
+    (re.compile(r"\bya29\.[A-Za-z0-9._~-]{15,}"), "[GOOGLE_ACCESS_TOKEN_REDACTED]", 'ya29.'),
     # Login URLs occur inside free-form tool output, not only keyed JSON.
-    (re.compile(r'''([?&#](?:token|access_token|refresh_token|id_token|session_token|code|oobCode|apiKey|api_key)=)[^\s&#"'<>\\]+''', re.I), r"\1[REDACTED]"),
-    (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "[GOOGLE_API_KEY_REDACTED]"),
-    (re.compile(r'''(\b[A-Za-z_]*(?:token|secret|password|api_key)\\*["']\s*:\s*\\*["'])[A-Za-z0-9._~+/=-]{16,}(\\*["'])''', re.I), r"\1[REDACTED]\2"),
-    (re.compile(r'''(\b(?:[A-Za-z_]*(?:token|secret|password|api_key)|token|secret|password)\s*[:=]\s*)["']?[A-Za-z0-9._~+/=-]{16,}["']?''', re.I), r"\1[REDACTED]"),
-    (re.compile(r"\bgAAAAA[A-Za-z0-9_-]{80,}={0,2}\b"), "[ENCRYPTED_CONTENT_OMITTED_FROM_NORMALIZED_RAW_AVAILABLE]"),
-    (re.compile(r"(api\.telegram\.org/bot)[^/\s]+"), r"\1[REDACTED]"),
-    (re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b"), "[TELEGRAM_TOKEN_REDACTED]"),
-    (re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}\b"), "[OPENAI_KEY_REDACTED]"),
-    (re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"), "[GITHUB_TOKEN_REDACTED]"),
-    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"), "[GITHUB_TOKEN_REDACTED]"),
-    (re.compile(r"\bsgp_(?:(?:[a-f0-9]{16}|local)_)?[a-f0-9]{40}\b", re.I), "[REDACTED]"),
-    (re.compile(r"\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b"), "[JWT_REDACTED]"),
-    (re.compile(r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]{8,}"), r"\1[REDACTED]"),
-    (re.compile(r'("(?:accessToken|sessionToken|idToken|refreshToken|token)"\s*:\s*")[^"]+(")', re.I), r"\1[REDACTED]\2"),
+    (re.compile(r'''([?&#](?:token|access_token|refresh_token|id_token|session_token|code|oobCode|apiKey|api_key)=)[^\s&#"'<>\\]+''', re.I), r"\1[REDACTED]", '='),
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "[GOOGLE_API_KEY_REDACTED]", 'AIza'),
+    (re.compile(r'''(\b[A-Za-z_]*(?:token|secret|password|api_key)\\*["']\s*:\s*\\*["'])[A-Za-z0-9._~+/=-]{16,}(\\*["'])''', re.I), r"\1[REDACTED]\2", ':'),
+    (re.compile(r'''(\b(?:[A-Za-z_]*(?:token|secret|password|api_key)|token|secret|password)\s*[:=]\s*)["']?[A-Za-z0-9._~+/=-]{16,}["']?''', re.I), r"\1[REDACTED]", None),
+    (re.compile(r"\bgAAAAA[A-Za-z0-9_-]{80,}={0,2}\b"), "[ENCRYPTED_CONTENT_OMITTED_FROM_NORMALIZED_RAW_AVAILABLE]", 'gAAAAA'),
+    (re.compile(r"(api\.telegram\.org/bot)[^/\s]+"), r"\1[REDACTED]", 'api.telegram.org/bot'),
+    (re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b"), "[TELEGRAM_TOKEN_REDACTED]", ':'),
+    (re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}\b"), "[OPENAI_KEY_REDACTED]", 'sk-'),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"), "[GITHUB_TOKEN_REDACTED]", 'gh'),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"), "[GITHUB_TOKEN_REDACTED]", 'github_pat_'),
+    (re.compile(r"\bsgp_(?:(?:[a-f0-9]{16}|local)_)?[a-f0-9]{40}\b", re.I), "[REDACTED]", '_'),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b"), "[JWT_REDACTED]", 'eyJ'),
+    (re.compile(r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]{8,}"), r"\1[REDACTED]", None),
+    (re.compile(r'("(?:accessToken|sessionToken|idToken|refreshToken|token)"\s*:\s*")[^"]+(")', re.I), r"\1[REDACTED]\2", '"'),
 )
 
 
@@ -376,23 +378,30 @@ def _remaining_credential_content(text: str) -> bool:
     # of a multiword credential. Raw originals remain in the private archive.
     inspected = text
     for _ in range(4):
-        inspected = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m[1], 16)), inspected)
-        inspected = inspected.replace('\\"', '"').replace('""', '"')
-        inspected = inspected.replace(r"\/", "/")
-    if re.search(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", inspected):
+        normalized = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m[1], 16)), inspected)
+        normalized = normalized.replace('\\"', '"').replace('""', '"').replace(r"\/", "/")
+        if normalized == inspected:
+            break
+        inspected = normalized
+    if "PRIVATE KEY-----" in inspected and re.search(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", inspected):
         return True
-    for match in re.finditer(r'''(?i)(?:https?://([^\s/<>"']+)@|[a-z][a-z0-9+.-]*://([^\s/@<>"']+:[^\s/<>"']*)@)''', inspected):
-        if (match[1] or match[2]) != "[REDACTED]":
+    if "@" in inspected:
+        for match in re.finditer(r'''(?i)(?:https?://([^\s/<>"']+)@|[a-z][a-z0-9+.-]*://([^\s/@<>"']+:[^\s/<>"']*)@)''', inspected):
+            if (match[1] or match[2]) != "[REDACTED]":
+                return True
+    if ":" in inspected:
+        command_text = re.sub(r"\\\r?\n", " ", inspected)
+        for match in _CURL_USER_CREDENTIAL.finditer(command_text):
+            userinfo = next(value for value in match.groups() if value is not None)
+            username, separator, password = userinfo.partition(":")
+            if separator and not (_SHELL_VAR.fullmatch(username) and _SHELL_VAR.fullmatch(password)):
+                return True
+    if ":" in inspected or "=" in inspected:
+        if any(not _SAFE_CREDENTIAL_VALUE.match(match[1]) for match in _CREDENTIAL_CONTEXT.finditer(inspected)):
             return True
-    command_text = re.sub(r"\\\r?\n", " ", inspected)
-    for match in _CURL_USER_CREDENTIAL.finditer(command_text):
-        userinfo = next(value for value in match.groups() if value is not None)
-        username, separator, password = userinfo.partition(":")
-        if separator and not (_SHELL_VAR.fullmatch(username) and _SHELL_VAR.fullmatch(password)):
-            return True
-    return any(not _SAFE_CREDENTIAL_VALUE.match(match[1])
-               for pattern in (_CREDENTIAL_CONTEXT, _CREDENTIAL_FLAG_CONTEXT)
-               for match in pattern.finditer(inspected))
+    return "--" in inspected and any(
+        not _SAFE_CREDENTIAL_VALUE.match(match[1]) for match in _CREDENTIAL_FLAG_CONTEXT.finditer(inspected)
+    )
 
 
 def redact_runner_bundle(match: re.Match[str]) -> str:
@@ -409,16 +418,21 @@ def redact_runner_bundle(match: re.Match[str]) -> str:
 
 
 def redact_text(value: str) -> str:
+    if value == "":
+        return value
     text = value.replace("\x00", " ")
     # unittest can leak a resolved credential in both its assertion and diff.
     # Keep ordinary hashes outside assertion failures intact; never require a
     # vault lookup or a list of live secret values to redact this failure form.
-    for failure in re.findall(r"(?m)^AssertionError: (.+)$", text):
-        for _, literal in re.findall(r"([\"'])([A-Za-z0-9._~+/=-]{16,})\1", failure):
-            text = text.replace(literal, "[ASSERTION_VALUE_REDACTED]")
-    for pattern, replacement in SENSITIVE_TEXT_PATTERNS:
-        text = pattern.sub(replacement, text)
-    text = ENCODED_JSON_RE.sub(redact_runner_bundle, text)
+    if "AssertionError: " in text:
+        for failure in re.findall(r"(?m)^AssertionError: (.+)$", text):
+            for _, literal in re.findall(r"([\"'])([A-Za-z0-9._~+/=-]{16,})\1", failure):
+                text = text.replace(literal, "[ASSERTION_VALUE_REDACTED]")
+    for pattern, replacement, required in SENSITIVE_TEXT_PATTERNS:
+        if required is None or required in text:
+            text = pattern.sub(replacement, text)
+    if "ey" in text:
+        text = ENCODED_JSON_RE.sub(redact_runner_bundle, text)
     if has_sourcegraph_context(text):
         text = redact_bare_sourcegraph_tokens(text)
     text = _OPAQUE_LITERAL.sub(_mask_opaque_literal, text)
