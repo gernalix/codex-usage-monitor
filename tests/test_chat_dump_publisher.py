@@ -73,7 +73,7 @@ def test_provider_context_covers_records_in_same_chunk(tmp_path) -> None:
     session = "11111111-2222-3333-4444-555555555555"
     source = tmp_path / f"rollout-{session}.jsonl"
     digest = "f9e813a7ca05132b6d2c" * 2
-    provider = "Source" + "graph"
+    provider = "check_Source" + "GraphContext"
     records = [line({"type": "diagnostic", "output": "Git ref " + digest, "count": 2}),
                line({"type": "note", "text": provider + " diagnostic"})]
     source.write_text("".join(records), encoding="utf-8")

@@ -338,7 +338,8 @@ _OPAQUE_LITERAL = re.compile(
         (?=[\x60\x27\x22\s;]|\\[nr]|$)""",
     re.IGNORECASE | re.VERBOSE,
 )
-_SOURCEGRAPH_TOKEN_TEXT = re.compile(r"\bsourcegraph\b|sgp_", re.IGNORECASE)
+# Provider names can appear inside identifiers and filenames in exported diagnostics.
+_SOURCEGRAPH_TOKEN_TEXT = re.compile(r"sourcegraph|sgp_", re.IGNORECASE)
 _BARE_SOURCEGRAPH_TOKEN = re.compile(r"\b[a-f0-9]{40}\b", re.IGNORECASE)
 
 

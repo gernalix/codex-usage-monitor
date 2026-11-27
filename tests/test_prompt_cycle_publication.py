@@ -115,7 +115,7 @@ class PromptCyclePublicationTests(unittest.TestCase):
 
     def test_transcript_redacts_provider_tokens_across_records(self) -> None:
         digest = "f9e813a7ca05132b6d2c" * 2
-        provider = "Source" + "graph"
+        provider = "check_Source" + "GraphContext"
         cycles = self.cycles()
         cycles[0]["events"] = [
             {"role": "tool", "content_text": "reported value " + digest, "count": 2},
